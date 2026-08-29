@@ -1,12 +1,12 @@
 import { useState, useEffect } from 'react';
 import { ActiveTab, ScanRecord, StaffMember, VenueToken, HourlyStat, AppSettings } from './types';
 import {
-  INITIAL_SETTINGS,
-  INITIAL_SCANS,
-  INITIAL_STAFF,
-  INITIAL_TOKENS,
-  INITIAL_HOURLY,
-} from './data/initialData';
+  useFirebaseScans,
+  useFirebaseSettings,
+  useFirebaseStaff,
+  useFirebaseTokens,
+  useFirebaseHourlyStats
+} from './hooks/useFirebaseData';
 import { TopAppBar } from './components/TopAppBar';
 import { BottomNavBar } from './components/BottomNavBar';
 import { ScannerView } from './components/ScannerView';
@@ -22,100 +22,16 @@ export default function App() {
   const [currentTab, setCurrentTab] = useState<ActiveTab>('scanner');
   const [isLocked, setIsLocked] = useState(false);
 
-  // App Settings with LocalStorage persistence
-  const [settings, setSettings] = useState<AppSettings>(() => {
-    try {
-      const saved = localStorage.getItem('id_scanner_settings');
-      return saved ? JSON.parse(saved) : INITIAL_SETTINGS;
-    } catch {
-      return INITIAL_SETTINGS;
-    }
-  });
-
-  // Scan Records with LocalStorage persistence
-  const [scans, setScans] = useState<ScanRecord[]>(() => {
-    try {
-      const saved = localStorage.getItem('id_scanner_scans');
-      return saved ? JSON.parse(saved) : INITIAL_SCANS;
-    } catch {
-      return INITIAL_SCANS;
-    }
-  });
-
-  // Staff members
-  const [staffList, setStaffList] = useState<StaffMember[]>(() => {
-    try {
-      const saved = localStorage.getItem('id_scanner_staff');
-      return saved ? JSON.parse(saved) : INITIAL_STAFF;
-    } catch {
-      return INITIAL_STAFF;
-    }
-  });
-
-  // Venue tokens
-  const [tokens, setTokens] = useState<VenueToken[]>(() => {
-    try {
-      const saved = localStorage.getItem('id_scanner_tokens');
-      return saved ? JSON.parse(saved) : INITIAL_TOKENS;
-    } catch {
-      return INITIAL_TOKENS;
-    }
-  });
-
-  // Hourly Stats
-  const [hourlyStats, setHourlyStats] = useState<HourlyStat[]>(() => {
-    try {
-      const saved = localStorage.getItem('id_scanner_hourly');
-      return saved ? JSON.parse(saved) : INITIAL_HOURLY;
-    } catch {
-      return INITIAL_HOURLY;
-    }
-  });
-
-  // Synchronize to localStorage
-  useEffect(() => {
-    try {
-      localStorage.setItem('id_scanner_settings', JSON.stringify(settings));
-    } catch {
-      // Storage quota or private mode
-    }
-  }, [settings]);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem('id_scanner_scans', JSON.stringify(scans));
-    } catch {
-      // Storage quota
-    }
-  }, [scans]);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem('id_scanner_staff', JSON.stringify(staffList));
-    } catch {
-      // Storage quota
-    }
-  }, [staffList]);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem('id_scanner_tokens', JSON.stringify(tokens));
-    } catch {
-      // Storage quota
-    }
-  }, [tokens]);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem('id_scanner_hourly', JSON.stringify(hourlyStats));
-    } catch {
-      // Storage quota
-    }
-  }, [hourlyStats]);
+  // Firebase State Hooks
+  const { settings, updateSettings } = useFirebaseSettings();
+  const { scans, addScan, deleteScan, purgeScans } = useFirebaseScans();
+  const { staffList, addStaff } = useFirebaseStaff();
+  const { tokens, addToken } = useFirebaseTokens();
+  const { hourlyStats, updateHourStat, resetStats } = useFirebaseHourlyStats();
 
   // Handlers
   const handleScanOrVerifyComplete = (record: ScanRecord) => {
-    setScans((prev) => [record, ...prev]);
+    addScan(record);
 
     // Update hourly stats volume
     const currentHourNumber = new Date().getHours();
@@ -127,31 +43,23 @@ export default function App() {
     else if (currentHourNumber >= 0 && currentHourNumber < 1) hourKey = '12AM';
     else if (currentHourNumber >= 1) hourKey = '1AM';
 
-    setHourlyStats((prev) =>
-      prev.map((item) => {
-        if (item.hour === hourKey) {
-          return {
-            ...item,
-            scans: item.scans + 1,
-            permitted: record.status === 'PERMITTED' ? item.permitted + 1 : item.permitted,
-            denied: record.status !== 'PERMITTED' ? item.denied + 1 : item.denied,
-          };
-        }
-        return item;
-      })
+    updateHourStat(
+      hourKey, 
+      record.status === 'PERMITTED' ? 1 : 0, 
+      record.status !== 'PERMITTED' ? 1 : 0
     );
   };
 
   const handlePurgeHistory = () => {
-    setScans([]);
+    purgeScans();
   };
 
   const handleDeleteSingleScan = (id: string) => {
-    setScans((prev) => prev.filter((s) => s.id !== id));
+    deleteScan(id);
   };
 
   const handleAddStaff = (member: StaffMember) => {
-    setStaffList((prev) => [member, ...prev]);
+    addStaff(member);
   };
 
   const handleGenerateToken = () => {
@@ -162,22 +70,15 @@ export default function App() {
       syncedTime: 'JUST NOW',
       deviceId: `DEV-MOB-${Math.floor(100 + Math.random() * 900)}`,
     };
-    setTokens((prev) => [newToken, ...prev]);
+    addToken(newToken);
   };
 
   const handleResetShiftData = () => {
-    setHourlyStats([
-      { hour: '8PM', scans: 0, permitted: 0, denied: 0 },
-      { hour: '9PM', scans: 0, permitted: 0, denied: 0 },
-      { hour: '10PM', scans: 0, permitted: 0, denied: 0 },
-      { hour: '11PM', scans: 0, permitted: 0, denied: 0 },
-      { hour: '12AM', scans: 0, permitted: 0, denied: 0 },
-      { hour: '1AM', scans: 0, permitted: 0, denied: 0 },
-    ]);
+    resetStats();
   };
 
   const handleUpdateSettings = (updated: Partial<AppSettings>) => {
-    setSettings((prev) => ({ ...prev, ...updated }));
+    updateSettings(updated);
   };
 
   return (
@@ -261,7 +162,7 @@ export default function App() {
         onUnlock={() => setIsLocked(false)}
         settings={settings}
         onUpdateStaff={(name, id) => {
-          setSettings((prev) => ({ ...prev, staffName: name, staffId: id }));
+          updateSettings({ staffName: name, staffId: id });
         }}
       />
     </div>
