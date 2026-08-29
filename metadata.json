@@ -1,0 +1,7 @@
+{
+  "name": "ID Scanner - Hospitality Pro",
+  "description": "High-contrast ID scanner, age verification, compliance log, and venue management system for hospitality door staff and security.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+
