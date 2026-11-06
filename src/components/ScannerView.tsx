@@ -1,7 +1,8 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import jsQR from 'jsqr';
-import { ScanRecord, AppSettings, DocumentType } from '../types';
+import { ScanRecord, AppSettings, DocumentType, ScanStatus } from '../types';
 import { playSound, triggerHaptic } from '../utils/audio';
+import { parseIdBarcode, calculateAge, formatDob, parseDateString } from '../utils/idParser';
 import confetti from 'canvas-confetti';
 
 interface ScannerViewProps {
@@ -21,6 +22,11 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
   const [lastResult, setLastResult] = useState<ScanRecord | null>(null);
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [showSimulator, setShowSimulator] = useState(false);
+  const [capturedPhotoUrl, setCapturedPhotoUrl] = useState<string | null>(null);
+  const [showDobModal, setShowDobModal] = useState(false);
+  const [modalDobDigits, setModalDobDigits] = useState('');
+  const [modalDocType, setModalDocType] = useState<DocumentType>('NZDL');
+
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -48,7 +54,7 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
         setCameraError(null);
       } catch {
         if (active) {
-          setCameraError('Camera access unavailable. Using optical framing mode.');
+          setCameraError('Camera access unavailable. Using optical snapshot mode.');
           setUseLiveCamera(false);
         }
       }
@@ -77,13 +83,14 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
             advanced: [{ torch: nextTorch }]
           });
         } catch {
-          // Hardware torch not supported or error
+          // Hardware torch unsupported
         }
       }
     }
   };
 
-  const handleQrDetected = useCallback((data: string) => {
+  // Process decoded raw string from Barcode / PDF417 / QR
+  const handleDecodedBarcode = useCallback((rawText: string) => {
     if (isScanning) return;
     setIsScanning(true);
     playSound('beep', settings.audioFeedback);
@@ -92,72 +99,223 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
     const timeStr = now.toTimeString().split(' ')[0];
     const dateStr = now.toISOString().split('T')[0];
 
-    // Check if pairing token / URL
-    if (data.includes('TOKEN-') || data.includes('pair=') || data.includes('CT_NZAGE2')) {
-      playSound('success', settings.audioFeedback);
-      triggerHaptic('success', settings.hapticFeedback);
+    const parsed = parseIdBarcode(rawText, settings.minAge);
+    if (parsed) {
       const newRecord: ScanRecord = {
-        id: `qr-pair-${Date.now()}`,
+        id: `scan-${Date.now()}`,
         timestamp: timeStr,
         date: dateStr,
         createdAt: Date.now(),
-        documentType: 'Other',
-        documentLabel: 'Venue Sync QR Token',
-        dob: '--',
-        calculatedAge: null,
-        status: 'PERMITTED',
-        statusReason: `Paired Venue Token: ${data.slice(0, 24)}...`,
+        documentType: parsed.documentType,
+        documentLabel: parsed.documentLabel,
+        dob: parsed.dob,
+        calculatedAge: parsed.calculatedAge,
+        status: parsed.status,
+        statusReason: parsed.statusReason,
         isManual: false,
-        documentNumber: data.slice(0, 16),
+        documentNumber: parsed.documentNumber,
+        notes: parsed.notes,
         staffName: settings.staffName,
       };
+
       setLastResult(newRecord);
       setIsScanning(false);
       onScanComplete(newRecord);
+
+      if (parsed.status === 'PERMITTED') {
+        playSound('success', settings.audioFeedback);
+        triggerHaptic('success', settings.hapticFeedback);
+        confetti({
+          particleCount: 35,
+          spread: 60,
+          origin: { y: 0.6 },
+          colors: ['#00ff85', '#61ff97', '#ffffff'],
+        });
+      } else {
+        playSound('denied', settings.audioFeedback);
+        triggerHaptic('error', settings.hapticFeedback);
+      }
+    } else {
+      // Unrecognized barcode payload - prompt optical confirmation
+      setIsScanning(false);
+      setModalDobDigits('');
+      setShowDobModal(true);
+    }
+  }, [isScanning, onScanComplete, settings]);
+
+  // Optical detection loop for live video stream
+  useEffect(() => {
+    let animId: number;
+    let lastScanTime = 0;
+    let detector: any = null;
+
+    if (typeof window !== 'undefined' && 'BarcodeDetector' in window) {
+      try {
+        detector = new (window as any).BarcodeDetector({
+          formats: ['pdf417', 'qr_code', 'code_128', 'code_39', 'data_matrix']
+        });
+      } catch (e) {
+        console.warn('BarcodeDetector initialization:', e);
+      }
+    }
+
+    const scanFrame = async () => {
+      animId = requestAnimationFrame(scanFrame);
+      const now = Date.now();
+      if (now - lastScanTime < 300) return;
+      lastScanTime = now;
+
+      if (!useLiveCamera || isScanning || lastResult || showDobModal) return;
+      const video = videoRef.current;
+      if (!video || video.readyState !== video.HAVE_ENOUGH_DATA) return;
+
+      // 1. Try native BarcodeDetector (PDF417 on driver licenses + 2D codes)
+      if (detector) {
+        try {
+          const barcodes = await detector.detect(video);
+          if (barcodes && barcodes.length > 0 && barcodes[0].rawValue) {
+            handleDecodedBarcode(barcodes[0].rawValue);
+            return;
+          }
+        } catch {}
+      }
+
+      // 2. Fallback to jsQR
+      try {
+        const offscreen = document.createElement('canvas');
+        offscreen.width = video.videoWidth || 640;
+        offscreen.height = video.videoHeight || 480;
+        const ctx = offscreen.getContext('2d', { willReadFrequently: true });
+        if (!ctx) return;
+
+        ctx.drawImage(video, 0, 0, offscreen.width, offscreen.height);
+        const imageData = ctx.getImageData(0, 0, offscreen.width, offscreen.height);
+        const code = jsQR(imageData.data, imageData.width, imageData.height, {
+          inversionAttempts: 'dontInvert',
+        });
+
+        if (code && code.data) {
+          handleDecodedBarcode(code.data);
+        }
+      } catch {}
+    };
+
+    if (useLiveCamera) {
+      animId = requestAnimationFrame(scanFrame);
+    }
+
+    return () => {
+      cancelAnimationFrame(animId);
+    };
+  }, [useLiveCamera, isScanning, lastResult, showDobModal, handleDecodedBarcode]);
+
+  // Capture button clicked
+  const handleCaptureFrame = async () => {
+    if (isScanning) return;
+    setIsScanning(true);
+    playSound('click', settings.audioFeedback);
+
+    let frameDataUrl: string | null = null;
+    let detectedRaw: string | null = null;
+
+    if (videoRef.current && canvasRef.current) {
+      const canvas = canvasRef.current;
+      const video = videoRef.current;
+      canvas.width = video.videoWidth || 640;
+      canvas.height = video.videoHeight || 480;
+      const ctx = canvas.getContext('2d');
+      if (ctx) {
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        try {
+          frameDataUrl = canvas.toDataURL('image/jpeg', 0.85);
+          
+          // Try BarcodeDetector on canvas
+          if (typeof window !== 'undefined' && 'BarcodeDetector' in window) {
+            try {
+              const detector = new (window as any).BarcodeDetector({
+                formats: ['pdf417', 'qr_code', 'code_128', 'code_39', 'data_matrix']
+              });
+              const codes = await detector.detect(canvas);
+              if (codes && codes.length > 0 && codes[0].rawValue) {
+                detectedRaw = codes[0].rawValue;
+              }
+            } catch {}
+          }
+
+          // Try jsQR if no barcode found yet
+          if (!detectedRaw) {
+            const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+            const qr = jsQR(imgData.data, imgData.width, imgData.height);
+            if (qr && qr.data) {
+              detectedRaw = qr.data;
+            }
+          }
+        } catch {}
+      }
+    }
+
+    if (detectedRaw) {
+      setIsScanning(false);
+      handleDecodedBarcode(detectedRaw);
       return;
     }
 
-    // Attempt to extract DOB if present in QR code text (e.g. DD.MM.YYYY, YYYY-MM-DD, or DD/MM/YYYY)
-    let dob = '18.04.1996';
-    let age = 30;
-    const dobMatch = data.match(/(\d{2})[./-](\d{2})[./-](\d{4})/) || data.match(/(\d{4})[./-](\d{2})[./-](\d{2})/);
-    if (dobMatch) {
-      let d = parseInt(dobMatch[1]);
-      let m = parseInt(dobMatch[2]);
-      let y = parseInt(dobMatch[3]);
-      if (y < 1000) {
-        y = parseInt(dobMatch[1]);
-        m = parseInt(dobMatch[2]);
-        d = parseInt(dobMatch[3]);
-      }
-      dob = `${d.toString().padStart(2, '0')}.${m.toString().padStart(2, '0')}.${y}`;
-      const birthDate = new Date(y, m - 1, d);
-      const diff = Date.now() - birthDate.getTime();
-      age = Math.max(0, Math.floor(diff / (365.25 * 24 * 60 * 60 * 1000)));
+    // No barcode was found in optical frame - show DOB confirmation modal with captured frame
+    setIsScanning(false);
+    setCapturedPhotoUrl(frameDataUrl);
+    setModalDobDigits('');
+    setShowDobModal(true);
+  };
+
+  // Submit confirmed DOB from optical modal
+  const handleConfirmOpticalDob = (digits: string, docType: DocumentType) => {
+    if (digits.length !== 8) return;
+    const day = parseInt(digits.substring(0, 2), 10);
+    const month = parseInt(digits.substring(2, 4), 10);
+    const year = parseInt(digits.substring(4, 8), 10);
+
+    if (isNaN(day) || isNaN(month) || isNaN(year) || month < 1 || month > 12 || day < 1 || day > 31) {
+      return;
     }
 
-    const permitted = age >= settings.minAge;
+    const calculatedAge = calculateAge(day, month, year);
+    const permitted = calculatedAge >= settings.minAge;
+    const formattedDob = formatDob(day, month, year);
+
+    const now = new Date();
+    const timeStr = now.toTimeString().split(' ')[0];
+    const dateStr = now.toISOString().split('T')[0];
+
+    const labelMap: Record<DocumentType, string> = {
+      NZDL: 'NZ Driver Licence (Optical)',
+      NZ_Passport: 'NZ Passport (Optical)',
+      R18_Card: '18+ Kiwi Access Card (Optical)',
+      Intl_Passport: 'International Passport (Optical)',
+      Intl_ID: 'International ID Card (Optical)',
+      Other: 'National ID Card (Optical)'
+    };
+
     const newRecord: ScanRecord = {
-      id: `qr-${Date.now()}`,
+      id: `scan-${Date.now()}`,
       timestamp: timeStr,
       date: dateStr,
       createdAt: Date.now(),
-      documentType: 'Intl_ID',
-      documentLabel: 'Digital QR Credential',
-      dob,
-      calculatedAge: age,
+      documentType: docType,
+      documentLabel: labelMap[docType] || 'ID Document (Optical)',
+      dob: formattedDob,
+      calculatedAge: calculatedAge,
       status: permitted ? 'PERMITTED' : 'DENIED',
-      statusReason: permitted 
-        ? `QR Code Verified (${age}+ Legal Adult)` 
-        : `QR Code Underage Refusal (${age} < ${settings.minAge})`,
+      statusReason: permitted
+        ? `Optical Card Verified (${calculatedAge}+ Legal Adult)`
+        : `Underage Patron Refusal (${calculatedAge} < ${settings.minAge})`,
       isManual: false,
-      documentNumber: `QR-${Math.floor(100000 + Math.random() * 900000)}`,
-      notes: data.slice(0, 40),
+      documentNumber: `OPT-${Math.floor(100000 + Math.random() * 900000)}`,
       staffName: settings.staffName,
     };
 
+    setShowDobModal(false);
+    setCapturedPhotoUrl(null);
     setLastResult(newRecord);
-    setIsScanning(false);
     onScanComplete(newRecord);
 
     if (permitted) {
@@ -173,120 +331,16 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
       playSound('denied', settings.audioFeedback);
       triggerHaptic('error', settings.hapticFeedback);
     }
-  }, [isScanning, onScanComplete, settings]);
+  };
 
-  // Optical detection loop for live video stream
-  useEffect(() => {
-    let animId: number;
-    let lastScanTime = 0;
-
-    const scanFrame = () => {
-      animId = requestAnimationFrame(scanFrame);
-      const now = Date.now();
-      if (now - lastScanTime < 350) return;
-      lastScanTime = now;
-
-      if (!useLiveCamera || isScanning || lastResult) return;
-      const video = videoRef.current;
-      if (!video || video.readyState !== video.HAVE_ENOUGH_DATA) return;
-
-      try {
-        const offscreen = document.createElement('canvas');
-        offscreen.width = video.videoWidth || 640;
-        offscreen.height = video.videoHeight || 480;
-        const ctx = offscreen.getContext('2d', { willReadFrequently: true });
-        if (!ctx) return;
-
-        ctx.drawImage(video, 0, 0, offscreen.width, offscreen.height);
-        const imageData = ctx.getImageData(0, 0, offscreen.width, offscreen.height);
-        const code = jsQR(imageData.data, imageData.width, imageData.height, {
-          inversionAttempts: 'dontInvert',
-        });
-
-        if (code && code.data) {
-          handleQrDetected(code.data);
-        }
-      } catch (e) {
-        // Ignore canvas read errors if camera frames are switching
-      }
-    };
-
-    if (useLiveCamera) {
-      animId = requestAnimationFrame(scanFrame);
-    }
-
-    return () => {
-      cancelAnimationFrame(animId);
-    };
-  }, [useLiveCamera, isScanning, lastResult, handleQrDetected]);
-
-  const handleCaptureFrame = () => {
-    if (isScanning) return;
-    setIsScanning(true);
-    playSound('click', settings.audioFeedback);
-
-    // Draw video frame to canvas and check for QR code
-    let detectedQrData: string | null = null;
-    if (videoRef.current && canvasRef.current) {
-      const canvas = canvasRef.current;
-      const video = videoRef.current;
-      canvas.width = video.videoWidth || 640;
-      canvas.height = video.videoHeight || 480;
-      const ctx = canvas.getContext('2d');
-      if (ctx) {
-        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-        try {
-          const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-          const code = jsQR(imgData.data, imgData.width, imgData.height);
-          if (code && code.data) {
-            detectedQrData = code.data;
-          }
-        } catch {}
-      }
-    }
-
-    if (detectedQrData) {
-      setIsScanning(false);
-      handleQrDetected(detectedQrData);
-      return;
-    }
-
-    setTimeout(() => {
-      const now = new Date();
-      const timeStr = now.toTimeString().split(' ')[0];
-      const dateStr = now.toISOString().split('T')[0];
-
-      // Realistic ID validation result
-      const newRecord: ScanRecord = {
-        id: `scan-${Date.now()}`,
-        timestamp: timeStr,
-        date: dateStr,
-        createdAt: Date.now(),
-        documentType: 'NZDL',
-        documentLabel: 'NZ Driver Licence (Optical)',
-        dob: '18.04.1996',
-        calculatedAge: 30,
-        status: 'PERMITTED',
-        statusReason: 'Live Optical Scan: Legal Adult verified',
-        isManual: false,
-        documentNumber: `DL-${Math.floor(100000 + Math.random() * 900000)}`,
-        gender: 'M',
-        staffName: settings.staffName,
-      };
-
-      setLastResult(newRecord);
-      setIsScanning(false);
-      onScanComplete(newRecord);
-
-      playSound('success', settings.audioFeedback);
-      triggerHaptic('success', settings.hapticFeedback);
-      confetti({
-        particleCount: 35,
-        spread: 60,
-        origin: { y: 0.6 },
-        colors: ['#00ff85', '#61ff97', '#ffffff'],
-      });
-    }, 600);
+  // Quick age preset selector for optical cards
+  const handleQuickAgePreset = (targetAge: number, docType: DocumentType) => {
+    const today = new Date();
+    const birthYear = today.getFullYear() - targetAge;
+    const birthMonth = today.getMonth() + 1;
+    const birthDay = today.getDate();
+    const digits = `${birthDay.toString().padStart(2, '0')}${birthMonth.toString().padStart(2, '0')}${birthYear}`;
+    handleConfirmOpticalDob(digits, docType);
   };
 
   const toggleCamera = async () => {
@@ -309,7 +363,7 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
         }
         setUseLiveCamera(true);
       } catch {
-        setCameraError('Camera access denied or unavailable. Using simulated optical scanner.');
+        setCameraError('Camera access denied or unavailable. Using snapshot mode.');
         setUseLiveCamera(false);
       }
     }
@@ -320,14 +374,13 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
     label: string,
     dob: string,
     age: number | null,
-    status: 'PERMITTED' | 'DENIED' | 'CHECK_DATE' | 'FAKE_FLAG',
+    status: ScanStatus,
     reason?: string
   ) => {
     if (isScanning) return;
     setIsScanning(true);
     playSound('click', settings.audioFeedback);
 
-    // Short scanning latency
     setTimeout(() => {
       const now = new Date();
       const timeStr = now.toTimeString().split(' ')[0];
@@ -337,6 +390,7 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
         id: `scan-${Date.now()}`,
         timestamp: timeStr,
         date: dateStr,
+        createdAt: Date.now(),
         documentType: type,
         documentLabel: label,
         dob: dob,
@@ -369,7 +423,7 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
         playSound('warning', settings.audioFeedback);
         triggerHaptic('warning', settings.hapticFeedback);
       }
-    }, 700);
+    }, 400);
   };
 
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -377,17 +431,54 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
     if (!file) return;
 
     setIsScanning(true);
-    setTimeout(() => {
-      // Analyze mock uploaded document
-      handleSimulatedScan(
-        'NZDL',
-        'NZDL (Scanned)',
-        '15.06.1998',
-        28,
-        'PERMITTED',
-        'Image OCR Verified Legal Adult'
-      );
-    }, 1000);
+    const reader = new FileReader();
+    reader.onload = async (ev) => {
+      const src = ev.target?.result as string;
+      const img = new Image();
+      img.onload = async () => {
+        const offscreen = document.createElement('canvas');
+        offscreen.width = img.width;
+        offscreen.height = img.height;
+        const ctx = offscreen.getContext('2d');
+        if (ctx) {
+          ctx.drawImage(img, 0, 0);
+
+          // 1. Try BarcodeDetector
+          if (typeof window !== 'undefined' && 'BarcodeDetector' in window) {
+            try {
+              const detector = new (window as any).BarcodeDetector({
+                formats: ['pdf417', 'qr_code', 'code_128', 'code_39', 'data_matrix']
+              });
+              const codes = await detector.detect(offscreen);
+              if (codes && codes.length > 0 && codes[0].rawValue) {
+                setIsScanning(false);
+                handleDecodedBarcode(codes[0].rawValue);
+                return;
+              }
+            } catch {}
+          }
+
+          // 2. Try jsQR
+          try {
+            const imgData = ctx.getImageData(0, 0, img.width, img.height);
+            const qr = jsQR(imgData.data, imgData.width, imgData.height);
+            if (qr && qr.data) {
+              setIsScanning(false);
+              handleDecodedBarcode(qr.data);
+              return;
+            }
+          } catch {}
+
+          // 3. If no barcode found on image, open optical DOB confirmation
+          setIsScanning(false);
+          setCapturedPhotoUrl(src);
+          setModalDobDigits('');
+          setShowDobModal(true);
+        }
+      };
+      img.src = src;
+    };
+    reader.readAsDataURL(file);
   };
 
   return (
@@ -401,101 +492,75 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
         <div className="flex items-center gap-2">
           <button
             onClick={toggleCamera}
-            className="text-[10px] font-mono-code px-2.5 py-1 rounded-full border border-white/10 glass-edge text-[#b9cbb9] hover:text-white flex items-center gap-1"
+            className="text-[10px] font-mono-code px-2.5 py-1 rounded-full border border-white/10 glass-edge text-[#b9cbb9] hover:text-white flex items-center gap-1 active:scale-95 transition-all"
           >
             <span className="material-symbols-outlined text-[14px]">
               {useLiveCamera ? 'videocam_off' : 'videocam'}
             </span>
-            {useLiveCamera ? 'Live Camera ON' : 'Switch Live Cam'}
+            {useLiveCamera ? 'Camera Active' : 'Switch Live Cam'}
           </button>
         </div>
       </div>
 
       {cameraError && (
-        <div className="w-full mb-3 p-2 bg-[#ff4b4b]/10 border border-[#ff4b4b]/30 rounded-lg text-[#ffb4ab] text-xs font-mono-code text-center">
+        <div className="w-full mb-3 p-2.5 bg-[#ff4b4b]/10 border border-[#ff4b4b]/30 rounded-xl text-[#ffb4ab] text-xs font-mono-code text-center">
           {cameraError}
         </div>
       )}
 
       {/* Main Viewfinder Box */}
-      <div
+      <div 
         id="scanner-view"
-        className={`relative w-full aspect-[4/3] max-h-[380px] bg-[#141414] rounded-2xl overflow-hidden mb-4 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.08)] ${
-          lastResult?.status === 'DENIED' || lastResult?.status === 'FAKE_FLAG'
-            ? 'glow-red border-2 border-[#ff4b4b]'
-            : lastResult?.status === 'PERMITTED'
-            ? 'glow-green border-2 border-[#00ff85]'
-            : lastResult?.status === 'CHECK_DATE'
-            ? 'glow-amber border-2 border-[#feb700]'
-            : 'border border-white/10'
+        className={`w-full aspect-[4/3] rounded-3xl relative overflow-hidden bg-black/90 border transition-all duration-300 flex items-center justify-center mb-4 select-none ${
+          lastResult
+            ? lastResult.status === 'PERMITTED'
+              ? 'border-[#00ff85] shadow-[0_0_30px_rgba(0,255,133,0.3)]'
+              : lastResult.status === 'DENIED' || lastResult.status === 'FAKE_FLAG'
+              ? 'border-[#ff4b4b] shadow-[0_0_30px_rgba(255,75,75,0.3)]'
+              : 'border-[#feb700] shadow-[0_0_30px_rgba(254,183,0,0.3)]'
+            : 'border-white/10'
         }`}
       >
-        {/* Live Video Feed or Simulated Animated Camera Grid */}
+        {/* Video stream container */}
         {useLiveCamera ? (
           <video
             ref={videoRef}
             autoPlay
             playsInline
             muted
-            className="absolute inset-0 w-full h-full object-cover"
+            className="w-full h-full object-cover"
           />
         ) : (
-          <div className="absolute inset-0 bg-[#141414] flex items-center justify-center">
-            {/* Tech grid texture */}
-            <div 
-              className="absolute inset-0 opacity-15"
-              style={{
-                backgroundImage: `linear-gradient(#00e476 1px, transparent 1px), linear-gradient(90deg, #00e476 1px, transparent 1px)`,
-                backgroundSize: '24px 24px',
-              }}
-            />
-            {/* Center target icon */}
-            <div className="relative flex flex-col items-center justify-center opacity-40">
-              <span className="material-symbols-outlined text-[64px] text-[#00e476]">
+          <div className="flex flex-col items-center justify-center p-6 text-center text-[#b9cbb9]">
+            <div className="w-16 h-16 rounded-full bg-white/5 border border-white/10 flex items-center justify-center mb-3">
+              <span className="material-symbols-outlined text-[32px] text-[#00ff85]">
                 document_scanner
               </span>
-              <div className="w-3 h-3 rounded-full bg-[#00e476] mt-2 animate-ping" />
             </div>
+            <div className="font-hanken text-sm font-bold text-white mb-1">
+              Optical Card Framing Mode
+            </div>
+            <p className="font-inter text-xs text-[#b9cbb9]/70 max-w-xs">
+              Position ID card within the laser brackets and tap Capture to verify age.
+            </p>
           </div>
         )}
 
-        {/* Laser Scanning Line */}
-        <div className="animate-scan-laser absolute left-0 right-0 h-[2px] bg-[#00ff85] shadow-[0_0_12px_#00ff85] z-10" />
-
-        {/* Corner Targeting Brackets */}
-        <div className="absolute inset-4 pointer-events-none">
-          {/* Top Left Bracket */}
-          <div className="absolute top-0 left-0 w-8 h-8 border-t-[3px] border-l-[3px] border-[#00e476] rounded-tl-md shadow-[0_0_8px_rgba(0,228,118,0.4)]" />
-          {/* Top Right Bracket */}
-          <div className="absolute top-0 right-0 w-8 h-8 border-t-[3px] border-r-[3px] border-[#00e476] rounded-tr-md shadow-[0_0_8px_rgba(0,228,118,0.4)]" />
-          {/* Bottom Left Bracket */}
-          <div className="absolute bottom-0 left-0 w-8 h-8 border-b-[3px] border-l-[3px] border-[#00e476] rounded-bl-md shadow-[0_0_8px_rgba(0,228,118,0.4)]" />
-          {/* Bottom Right Bracket */}
-          <div className="absolute bottom-0 right-0 w-8 h-8 border-b-[3px] border-r-[3px] border-[#00e476] rounded-br-md shadow-[0_0_8px_rgba(0,228,118,0.4)]" />
-
-          {/* Top Overlay Badges */}
-          <div className="absolute top-2 left-2 flex items-center gap-1.5 bg-[#0e0e0e]/80 backdrop-blur-sm px-2.5 py-1 rounded-full border border-white/10 z-10">
-            <span className="material-symbols-outlined text-[13px] text-[#00e476]">lock</span>
-            <span className="font-mono-code text-[9px] text-white tracking-wider">DATA ENCRYPTED</span>
-          </div>
-
-          <div className="absolute top-2 right-2 flex items-center gap-1.5 bg-[#0e0e0e]/80 backdrop-blur-sm px-2.5 py-1 rounded-full border border-white/10 z-10">
-            <span className="material-symbols-outlined text-[13px] text-[#00e476]">verified_user</span>
-            <span className="font-mono-code text-[9px] text-white tracking-wider">PRIVACY SHIELD</span>
-          </div>
-
-          {/* Bottom Left Overlay Badge */}
-          <div className="absolute bottom-2 left-2 flex items-center gap-1.5 bg-[#00ff85]/15 backdrop-blur-sm px-2.5 py-1 rounded-full border border-[#00ff85]/30 z-10">
-            <span className="material-symbols-outlined text-[13px] text-[#00e476]">privacy_tip</span>
-            <span className="font-mono-code text-[9px] text-[#00e476] tracking-wider">PRIVACY VERIFIED</span>
-          </div>
+        {/* High-Tech Framing Brackets */}
+        <div className="absolute inset-5 pointer-events-none">
+          <div className="absolute top-0 left-0 w-8 h-8 border-t-[3px] border-l-[3px] border-[#00ff85] rounded-tl-xl shadow-[0_0_10px_#00ff85]" />
+          <div className="absolute top-0 right-0 w-8 h-8 border-t-[3px] border-r-[3px] border-[#00ff85] rounded-tr-xl shadow-[0_0_10px_#00ff85]" />
+          <div className="absolute bottom-0 left-0 w-8 h-8 border-b-[3px] border-l-[3px] border-[#00ff85] rounded-bl-xl shadow-[0_0_10px_#00ff85]" />
+          <div className="absolute bottom-0 right-0 w-8 h-8 border-b-[3px] border-r-[3px] border-[#00ff85] rounded-br-xl shadow-[0_0_10px_#00ff85]" />
         </div>
 
-        {/* Torch / Flashlight Toggle Button */}
+        {/* Continuous Scanning Laser */}
+        <div className="animate-scan-laser absolute left-0 right-0 h-[2px] bg-[#00ff85] shadow-[0_0_12px_#00ff85] z-10" />
+
+        {/* Flashlight / Torch Toggle */}
         <button
-          id="torch-toggle-btn"
           onClick={toggleTorch}
-          className={`absolute bottom-3 right-3 p-3 rounded-full backdrop-blur-md transition-all z-20 ${
+          className={`absolute top-4 right-4 z-20 w-10 h-10 rounded-full flex items-center justify-center transition-all ${
             torchActive
               ? 'bg-[#feb700] text-black shadow-[0_0_15px_#feb700]'
               : 'bg-black/60 text-white hover:bg-white/20 border border-white/10'
@@ -508,12 +573,12 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
           </span>
         </button>
 
-        {/* Scanning Activity Spinner Overlay */}
+        {/* Scanning Spinner Overlay */}
         {isScanning && (
-          <div className="absolute inset-0 bg-black/60 backdrop-blur-sm flex flex-col items-center justify-center z-30">
+          <div className="absolute inset-0 bg-black/70 backdrop-blur-sm flex flex-col items-center justify-center z-30">
             <div className="w-12 h-12 border-3 border-[#00ff85] border-t-transparent rounded-full animate-spin mb-2" />
             <div className="font-mono-code text-xs font-bold text-[#00ff85] tracking-widest animate-pulse">
-              ANALYZING ID DOCUMENT...
+              ANALYZING ID CREDENTIAL...
             </div>
           </div>
         )}
@@ -598,54 +663,48 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
               <div className="w-[1px] h-4 bg-white/20" />
               <div>
                 <span className="text-xs text-[#b9cbb9]/70 mr-1">DOB:</span>
-                <span className="text-base font-bold text-white">{lastResult.dob}</span>
+                <span className="text-xl font-extrabold text-white">
+                  {lastResult.dob}
+                </span>
               </div>
             </div>
 
-            <p className="text-xs text-[#e5e2e1]/80 font-inter mb-3">
-              {lastResult.statusReason || `${lastResult.documentLabel} verified for venue entry`}
-            </p>
+            {/* Document Label & Subtext */}
+            <div className="text-xs font-mono-code text-[#b9cbb9] mb-1">
+              {lastResult.documentLabel} • {lastResult.documentNumber || 'VERIFIED'}
+            </div>
 
-            {/* Action to clear or scan next */}
+            {lastResult.statusReason && (
+              <div className="text-[11px] font-inter text-[#b9cbb9]/80 max-w-sm mt-1">
+                {lastResult.statusReason}
+              </div>
+            )}
+
+            {/* Clear Button */}
             <button
               onClick={() => setLastResult(null)}
-              className="px-5 py-2 bg-white/10 hover:bg-white/20 text-white rounded-full font-mono-code text-xs font-bold transition-all border border-white/10 active:scale-95 flex items-center gap-1.5"
+              className="mt-4 px-4 py-1.5 rounded-full bg-white/10 hover:bg-white/15 text-white font-mono-code text-xs flex items-center gap-1.5 active:scale-95 transition-all"
             >
               <span className="material-symbols-outlined text-[16px]">refresh</span>
-              READY FOR NEXT SCAN
+              Scan Next Patron
             </button>
           </div>
         ) : (
-          <div className="flex flex-col items-center text-center">
-            <span className="material-symbols-outlined text-[#00e476] mb-1.5 text-[32px]">
+          <div className="flex flex-col items-center justify-center text-center py-4">
+            <span className="material-symbols-outlined text-[32px] text-[#00ff85] mb-2 animate-bounce">
               qr_code_scanner
             </span>
-            <p className="font-hanken text-[20px] font-bold text-white tracking-tight uppercase">
-              READY TO SCAN
-            </p>
-            <p className="font-inter text-xs text-[#b9cbb9] mt-1 max-w-[280px]">
-              Align NZ Driver's Licence, Passport, or R18 Card within frame
-            </p>
-
-            <p className="font-mono-code text-[10px] text-[#00e476] mt-3 px-3 py-1.5 bg-[#00e476]/5 rounded-lg border border-[#00e476]/20">
-              Your data is encrypted locally and never stored on this device.
-            </p>
-
-            {/* Manual Override button */}
-            <div className="mt-3 pt-3 border-t border-white/10 w-full flex justify-center">
-              <button
-                onClick={onGoToManual}
-                className="font-mono-code text-xs font-bold text-[#b9cbb9] hover:text-[#00ff85] flex items-center gap-2 transition-colors uppercase tracking-wider"
-              >
-                <span className="material-symbols-outlined text-[16px]">terminal</span>
-                MANUAL ENTRY / OVERRIDE
-              </button>
+            <div className="font-hanken text-lg font-bold text-white mb-0.5">
+              Ready to Verify
             </div>
+            <p className="font-inter text-xs text-[#b9cbb9]/70">
+              Point camera at Driver License PDF417 barcode or ID card.
+            </p>
           </div>
         )}
       </div>
 
-      {/* Quick Test Scanner Triggers (Collapsed behind toggle for door security) */}
+      {/* Simulator & Tools Drawer */}
       <div className="w-full mt-4 glass-edge rounded-2xl p-4 border border-white/5">
         <div className="flex items-center justify-between mb-2">
           <button
@@ -662,7 +721,7 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
             className="text-[10px] font-mono-code text-[#00ff85] hover:underline flex items-center gap-1"
           >
             <span className="material-symbols-outlined text-[14px]">upload_file</span>
-            Upload ID
+            Upload ID Photo
           </button>
           <input
             ref={fileInputRef}
@@ -675,101 +734,212 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
 
         {showSimulator && (
           <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 mt-3 pt-3 border-t border-white/5">
-          <button
-            onClick={() =>
-              handleSimulatedScan(
-                'NZ_Passport',
-                'NZ Passport',
-                '05.08.1999',
-                27,
-                'PERMITTED',
-                'Verified Legal Adult (NZ Passport)'
-              )
-            }
-            className="p-2.5 bg-white/5 hover:bg-[#00ff85]/20 border border-white/10 hover:border-[#00ff85]/50 rounded-xl text-left transition-all active:scale-95"
-          >
-            <div className="text-[10px] font-mono-code text-[#00ff85] font-bold">PASS: ADULT (27)</div>
-            <div className="text-xs text-white font-semibold truncate">NZ Passport</div>
-          </button>
+            <button
+              onClick={() =>
+                handleSimulatedScan(
+                  'NZ_Passport',
+                  'NZ Passport',
+                  '05.08.1999',
+                  calculateAge(5, 8, 1999),
+                  'PERMITTED',
+                  'Verified Legal Adult (NZ Passport Passed)'
+                )
+              }
+              className="p-2.5 bg-white/5 hover:bg-[#00ff85]/20 border border-white/10 hover:border-[#00ff85]/50 rounded-xl text-left transition-all active:scale-95"
+            >
+              <div className="text-[10px] font-mono-code text-[#00ff85] font-bold">PASS: ADULT (27)</div>
+              <div className="text-xs text-white font-semibold truncate">NZ Passport</div>
+            </button>
 
-          <button
-            onClick={() =>
-              handleSimulatedScan(
-                'NZDL',
-                'NZDL',
-                '12.04.2009',
-                17,
-                'DENIED',
-                'Underage patron (17 years old - Threshold 18+)'
-              )
-            }
-            className="p-2.5 bg-white/5 hover:bg-[#ff4b4b]/20 border border-white/10 hover:border-[#ff4b4b]/50 rounded-xl text-left transition-all active:scale-95"
-          >
-            <div className="text-[10px] font-mono-code text-[#ff4b4b] font-bold">DENY: UNDER 18</div>
-            <div className="text-xs text-white font-semibold truncate">NZDL (Age 17)</div>
-          </button>
+            <button
+              onClick={() =>
+                handleSimulatedScan(
+                  'NZDL',
+                  'NZDL',
+                  '12.04.2009',
+                  calculateAge(12, 4, 2009),
+                  'DENIED',
+                  `Underage patron (${calculateAge(12, 4, 2009)} yrs - Minimum legal age is ${settings.minAge}+)`
+                )
+              }
+              className="p-2.5 bg-white/5 hover:bg-[#ff4b4b]/20 border border-white/10 hover:border-[#ff4b4b]/50 rounded-xl text-left transition-all active:scale-95"
+            >
+              <div className="text-[10px] font-mono-code text-[#ff4b4b] font-bold">DENY: UNDER 18</div>
+              <div className="text-xs text-white font-semibold truncate">NZDL (Minor)</div>
+            </button>
 
-          <button
-            onClick={() =>
-              handleSimulatedScan(
-                'R18_Card',
-                '18+ Card',
-                '14.02.1993',
-                33,
-                'PERMITTED',
-                'Kiwi Access 18+ Card Verified'
-              )
-            }
-            className="p-2.5 bg-white/5 hover:bg-[#00ff85]/20 border border-white/10 hover:border-[#00ff85]/50 rounded-xl text-left transition-all active:scale-95"
-          >
-            <div className="text-[10px] font-mono-code text-[#00ff85] font-bold">PASS: 18+ CARD</div>
-            <div className="text-xs text-white font-semibold truncate">Kiwi Access</div>
-          </button>
+            <button
+              onClick={() =>
+                handleSimulatedScan(
+                  'R18_Card',
+                  '18+ Kiwi Access Card',
+                  '14.02.2004',
+                  calculateAge(14, 2, 2004),
+                  'PERMITTED',
+                  'Kiwi Access 18+ Card Verified Legal Adult'
+                )
+              }
+              className="p-2.5 bg-white/5 hover:bg-[#00ff85]/20 border border-white/10 hover:border-[#00ff85]/50 rounded-xl text-left transition-all active:scale-95"
+            >
+              <div className="text-[10px] font-mono-code text-[#00ff85] font-bold">PASS: 18+ CARD</div>
+              <div className="text-xs text-white font-semibold truncate">Kiwi Access</div>
+            </button>
 
-          <button
-            onClick={() =>
-              handleSimulatedScan(
-                'Intl_ID',
-                'Intl ID (Manual)',
-                '23.10.2007',
-                18,
-                'CHECK_DATE',
-                'Borderline Age: 18th Birthday this month'
-              )
-            }
-            className="p-2.5 bg-white/5 hover:bg-[#feb700]/20 border border-white/10 hover:border-[#feb700]/50 rounded-xl text-left transition-all active:scale-95"
-          >
-            <div className="text-[10px] font-mono-code text-[#feb700] font-bold">CHECK DATE (18?)</div>
-            <div className="text-xs text-white font-semibold truncate">Intl ID Check</div>
-          </button>
+            <button
+              onClick={() => {
+                const today = new Date();
+                const borderlineYear = today.getFullYear() - settings.minAge;
+                const borderlineDob = formatDob(today.getDate(), today.getMonth() + 1, borderlineYear);
+                handleSimulatedScan(
+                  'Intl_ID',
+                  'Intl ID (Borderline)',
+                  borderlineDob,
+                  settings.minAge,
+                  'CHECK_DATE',
+                  `18th Birthday this month: Exactly ${settings.minAge} Years Old`
+                );
+              }}
+              className="p-2.5 bg-white/5 hover:bg-[#feb700]/20 border border-white/10 hover:border-[#feb700]/50 rounded-xl text-left transition-all active:scale-95"
+            >
+              <div className="text-[10px] font-mono-code text-[#feb700] font-bold">BORDERLINE (18)</div>
+              <div className="text-xs text-white font-semibold truncate">18th Birthday Check</div>
+            </button>
 
-          <button
-            onClick={() =>
-              handleSimulatedScan(
-                'Other',
-                'Fake ID Flag',
-                '--.--.----',
-                null,
-                'FAKE_FLAG',
-                'Security Hologram and microprint failure'
-              )
-            }
-            className="p-2.5 bg-white/5 hover:bg-[#ff4b4b]/20 border border-white/10 hover:border-[#ff4b4b]/50 rounded-xl text-left transition-all active:scale-95"
-          >
-            <div className="text-[10px] font-mono-code text-[#ff4b4b] font-bold">FLAG: SUSPECT ID</div>
-            <div className="text-xs text-white font-semibold truncate">Tamper Alert</div>
-          </button>
+            <button
+              onClick={() =>
+                handleSimulatedScan(
+                  'Other',
+                  'Flagged Altered Document',
+                  '--.--.----',
+                  null,
+                  'FAKE_FLAG',
+                  'Microprint and UV security feature validation failure'
+                )
+              }
+              className="p-2.5 bg-white/5 hover:bg-[#ff4b4b]/20 border border-white/10 hover:border-[#ff4b4b]/50 rounded-xl text-left transition-all active:scale-95"
+            >
+              <div className="text-[10px] font-mono-code text-[#ff4b4b] font-bold">FLAG: SUSPECT ID</div>
+              <div className="text-xs text-white font-semibold truncate">Tamper Alert</div>
+            </button>
 
-          <button
-            onClick={onGoToManual}
-            className="p-2.5 bg-[#00ff85]/10 hover:bg-[#00ff85]/20 border border-[#00ff85]/30 rounded-xl text-left transition-all active:scale-95 flex flex-col justify-center"
-          >
-            <div className="text-[10px] font-mono-code text-[#00ff85] font-bold">KEYPAD ENTRY</div>
-            <div className="text-xs text-white font-semibold truncate">Manual Verify →</div>
-          </button>
-        </div>
+            <button
+              onClick={onGoToManual}
+              className="p-2.5 bg-[#00ff85]/10 hover:bg-[#00ff85]/20 border border-[#00ff85]/30 rounded-xl text-left transition-all active:scale-95 flex flex-col justify-center"
+            >
+              <div className="text-[10px] font-mono-code text-[#00ff85] font-bold">KEYPAD ENTRY</div>
+              <div className="text-xs text-white font-semibold truncate">Manual Verify →</div>
+            </button>
+          </div>
         )}
       </div>
+
+      {/* Optical DOB Confirmation Sheet (When card photo taken without barcode) */}
+      {showDobModal && (
+        <div className="fixed inset-0 bg-black/85 backdrop-blur-md z-50 flex items-center justify-center p-4">
+          <div className="bg-[#141414] border border-white/15 rounded-3xl max-w-sm w-full p-5 shadow-2xl animate-scale-in">
+            <div className="flex justify-between items-center mb-3">
+              <div className="flex items-center gap-2">
+                <span className="material-symbols-outlined text-[22px] text-[#00ff85]">
+                  document_scanner
+                </span>
+                <h3 className="font-hanken text-lg font-bold text-white">
+                  Confirm Date of Birth
+                </h3>
+              </div>
+              <button
+                onClick={() => {
+                  setShowDobModal(false);
+                  setCapturedPhotoUrl(null);
+                }}
+                className="text-[#b9cbb9] hover:text-white p-1"
+              >
+                <span className="material-symbols-outlined text-[20px]">close</span>
+              </button>
+            </div>
+
+            {/* Captured frame preview if available */}
+            {capturedPhotoUrl && (
+              <div className="w-full h-32 rounded-xl overflow-hidden mb-3 border border-white/10 bg-black">
+                <img
+                  src={capturedPhotoUrl}
+                  alt="Captured ID"
+                  className="w-full h-full object-cover"
+                />
+              </div>
+            )}
+
+            <p className="text-xs font-inter text-[#b9cbb9] mb-3">
+              Select or enter the Date of Birth shown on the physical ID card:
+            </p>
+
+            {/* Quick Age Presets */}
+            <div className="mb-4">
+              <span className="font-mono-code text-[10px] text-[#b9cbb9]/70 uppercase tracking-wider block mb-1.5">
+                QUICK AGE SELECTION
+              </span>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => handleQuickAgePreset(17, modalDocType)}
+                  className="py-2 px-3 rounded-xl bg-[#ff4b4b]/15 border border-[#ff4b4b]/40 text-[#ff4b4b] font-mono-code text-xs font-bold text-left hover:bg-[#ff4b4b]/25 transition-all"
+                >
+                  <div>UNDER 18 (17)</div>
+                  <div className="text-[10px] text-[#b9cbb9]">Deny Entry</div>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleQuickAgePreset(18, modalDocType)}
+                  className="py-2 px-3 rounded-xl bg-[#feb700]/15 border border-[#feb700]/40 text-[#feb700] font-mono-code text-xs font-bold text-left hover:bg-[#feb700]/25 transition-all"
+                >
+                  <div>TURNS 18 (18)</div>
+                  <div className="text-[10px] text-[#b9cbb9]">Check Date</div>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleQuickAgePreset(21, modalDocType)}
+                  className="py-2 px-3 rounded-xl bg-[#00ff85]/15 border border-[#00ff85]/40 text-[#00ff85] font-mono-code text-xs font-bold text-left hover:bg-[#00ff85]/25 transition-all"
+                >
+                  <div>LEGAL ADULT (21)</div>
+                  <div className="text-[10px] text-[#b9cbb9]">Permit Entry</div>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleQuickAgePreset(26, modalDocType)}
+                  className="py-2 px-3 rounded-xl bg-[#00ff85]/15 border border-[#00ff85]/40 text-[#00ff85] font-mono-code text-xs font-bold text-left hover:bg-[#00ff85]/25 transition-all"
+                >
+                  <div>ADULT (26+)</div>
+                  <div className="text-[10px] text-[#b9cbb9]">Permit Entry</div>
+                </button>
+              </div>
+            </div>
+
+            {/* Exact DDMMYYYY Keypad input */}
+            <div>
+              <span className="font-mono-code text-[10px] text-[#b9cbb9]/70 uppercase tracking-wider block mb-1.5">
+                EXACT DATE OF BIRTH (DDMMYYYY)
+              </span>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  maxLength={8}
+                  placeholder="DDMMYYYY (e.g. 15082001)"
+                  value={modalDobDigits}
+                  onChange={(e) => setModalDobDigits(e.target.value.replace(/[^0-9]/g, '').slice(0, 8))}
+                  className="flex-1 bg-[#0a0a0a] border border-white/15 rounded-xl px-3 py-2 text-white font-mono-code text-sm tracking-wider focus:border-[#00ff85] focus:outline-none"
+                />
+                <button
+                  type="button"
+                  disabled={modalDobDigits.length !== 8}
+                  onClick={() => handleConfirmOpticalDob(modalDobDigits, modalDocType)}
+                  className="px-4 py-2 bg-[#00ff85] disabled:opacity-30 disabled:pointer-events-none text-[#003919] font-mono-code text-xs font-bold rounded-xl active:scale-95 transition-all"
+                >
+                  VERIFY
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
