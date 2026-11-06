@@ -24,14 +24,48 @@ export default function App() {
 
   // Firebase State Hooks
   const { settings, updateSettings } = useFirebaseSettings();
-  const { scans, addScan, deleteScan, purgeScans } = useFirebaseScans();
-  const { staffList, addStaff } = useFirebaseStaff();
-  const { tokens, addToken } = useFirebaseTokens();
+  const { scans, addScan, deleteScan, purgeScans } = useFirebaseScans(settings.autoPurgeHours);
+  const { staffList, addStaff, deleteStaff, incrementStaffScanCount } = useFirebaseStaff();
+  const { tokens, addToken, deleteToken } = useFirebaseTokens();
   const { hourlyStats, updateHourStat, resetStats } = useFirebaseHourlyStats();
+
+  // Global Keyboard Navigation (Digital Signage protocol)
+  useEffect(() => {
+    const tabs: ActiveTab[] = ['scanner', 'history', 'manual', 'stats', 'staff', 'settings'];
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Input guard
+      const target = e.target as HTMLElement | null;
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT')) {
+        return;
+      }
+
+      if (e.key === 'ArrowRight') {
+        setCurrentTab((prev) => {
+          const idx = tabs.indexOf(prev);
+          return tabs[(idx + 1) % tabs.length];
+        });
+      } else if (e.key === 'ArrowLeft') {
+        setCurrentTab((prev) => {
+          const idx = tabs.indexOf(prev);
+          return tabs[(idx - 1 + tabs.length) % tabs.length];
+        });
+      } else if (e.key === '0') {
+        setIsLocked((prev) => !prev);
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
 
   // Handlers
   const handleScanOrVerifyComplete = (record: ScanRecord) => {
     addScan(record);
+
+    // Increment scan counter on active staff if exists
+    if (settings.staffId) {
+      incrementStaffScanCount(settings.staffId);
+    }
 
     // Update hourly stats volume
     const currentHourNumber = new Date().getHours();
@@ -60,6 +94,14 @@ export default function App() {
 
   const handleAddStaff = (member: StaffMember) => {
     addStaff(member);
+  };
+
+  const handleDeleteStaff = (id: string) => {
+    deleteStaff(id);
+  };
+
+  const handleDeleteToken = (id: string) => {
+    deleteToken(id);
   };
 
   const handleGenerateToken = () => {
@@ -140,7 +182,9 @@ export default function App() {
               staffList={staffList}
               tokens={tokens}
               onAddStaff={handleAddStaff}
+              onDeleteStaff={handleDeleteStaff}
               onGenerateToken={handleGenerateToken}
+              onDeleteToken={handleDeleteToken}
               settings={settings}
             />
           )}
@@ -161,6 +205,7 @@ export default function App() {
         isOpen={isLocked}
         onUnlock={() => setIsLocked(false)}
         settings={settings}
+        staffList={staffList}
         onUpdateStaff={(name, id) => {
           updateSettings({ staffName: name, staffId: id });
         }}

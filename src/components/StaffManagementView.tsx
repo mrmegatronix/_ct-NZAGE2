@@ -6,7 +6,9 @@ interface StaffManagementViewProps {
   staffList: StaffMember[];
   tokens: VenueToken[];
   onAddStaff: (member: StaffMember) => void;
+  onDeleteStaff?: (id: string) => void;
   onGenerateToken: () => void;
+  onDeleteToken?: (id: string) => void;
   settings: AppSettings;
 }
 
@@ -14,12 +16,15 @@ export const StaffManagementView: React.FC<StaffManagementViewProps> = ({
   staffList,
   tokens,
   onAddStaff,
+  onDeleteStaff,
   onGenerateToken,
+  onDeleteToken,
   settings,
 }) => {
   const [activeSubTab, setActiveSubTab] = useState<'ROSTER' | 'SYNC'>('ROSTER');
   const [showAddModal, setShowAddModal] = useState(false);
   const [newStaffName, setNewStaffName] = useState('');
+  const [newStaffPin, setNewStaffPin] = useState('1234');
   const [newStaffRole, setNewStaffRole] = useState<'ADMIN' | 'SCANNER' | 'SUPERVISOR'>('SCANNER');
   const [qrCodeSeed, setQrCodeSeed] = useState(1);
 
@@ -35,11 +40,13 @@ export const StaffManagementView: React.FC<StaffManagementViewProps> = ({
       lastActive: 'Just now',
       scansCount: 0,
       email: `${newStaffName.toLowerCase().replace(/\s+/g, '.')}@${settings.venueName.toLowerCase().replace(/[^a-z]/g, '')}.co.nz`,
+      pin: newStaffPin.trim() || '1234',
     };
 
     onAddStaff(newMember);
     playSound('success', settings.audioFeedback);
     setNewStaffName('');
+    setNewStaffPin('1234');
     setShowAddModal(false);
   };
 
@@ -139,9 +146,15 @@ export const StaffManagementView: React.FC<StaffManagementViewProps> = ({
                       </div>
                     </div>
 
-                    <button className="text-[#b9cbb9]/50 hover:text-white p-1">
-                      <span className="material-symbols-outlined text-[20px]">more_vert</span>
-                    </button>
+                    {onDeleteStaff && (
+                      <button 
+                        onClick={() => onDeleteStaff(staff.id)}
+                        className="text-[#b9cbb9]/50 hover:text-[#ff4b4b] p-1 transition-colors"
+                        title="Remove Staff"
+                      >
+                        <span className="material-symbols-outlined text-[20px]">delete</span>
+                      </button>
+                    )}
                   </div>
 
                   <div className="mt-4 pt-3 border-t border-white/5 flex justify-between items-center text-xs font-mono-code">
@@ -289,9 +302,15 @@ export const StaffManagementView: React.FC<StaffManagementViewProps> = ({
                       </p>
                     </div>
                   </div>
-                  <span className="material-symbols-outlined text-[#b9cbb9]/50 hover:text-white">
-                    more_vert
-                  </span>
+                  {onDeleteToken && (
+                    <button 
+                      onClick={() => onDeleteToken(token.id)}
+                      className="text-[#b9cbb9]/50 hover:text-[#ff4b4b] p-1 transition-colors"
+                      title="Revoke Token"
+                    >
+                      <span className="material-symbols-outlined text-[20px]">delete</span>
+                    </button>
+                  )}
                 </div>
               ))}
             </div>
@@ -325,6 +344,22 @@ export const StaffManagementView: React.FC<StaffManagementViewProps> = ({
                   onChange={(e) => setNewStaffName(e.target.value)}
                   placeholder="e.g. Liam Cooper"
                   className="w-full bg-[#0e0e0e] border border-white/10 rounded-xl px-3.5 py-2.5 text-white font-inter text-sm focus:border-[#00ff85] focus:outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="block font-mono-code text-xs text-[#b9cbb9] mb-1">
+                  4-DIGIT SECURITY PIN
+                </label>
+                <input
+                  type="password"
+                  required
+                  maxLength={4}
+                  pattern="[0-9]{4}"
+                  value={newStaffPin}
+                  onChange={(e) => setNewStaffPin(e.target.value.replace(/[^0-9]/g, '').slice(0, 4))}
+                  placeholder="e.g. 5821"
+                  className="w-full bg-[#0e0e0e] border border-white/10 rounded-xl px-3.5 py-2.5 text-white font-mono-code text-sm tracking-widest focus:border-[#00ff85] focus:outline-none"
                 />
               </div>
 

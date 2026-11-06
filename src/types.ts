@@ -16,6 +16,7 @@ export interface ScanRecord {
   id: string;
   timestamp: string;
   date: string;
+  createdAt?: number;
   documentType: DocumentType;
   documentLabel: string;
   dob: string; // DD.MM.YYYY
@@ -37,6 +38,7 @@ export interface StaffMember {
   lastActive: string;
   scansCount: number;
   email?: string;
+  pin?: string;
 }
 
 export interface VenueToken {

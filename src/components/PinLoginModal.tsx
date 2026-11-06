@@ -1,11 +1,12 @@
 import React, { useState, useEffect } from 'react';
-import { AppSettings } from '../types';
+import { AppSettings, StaffMember } from '../types';
 import { playSound, triggerHaptic } from '../utils/audio';
 
 interface PinLoginModalProps {
   isOpen: boolean;
   onUnlock: () => void;
   settings: AppSettings;
+  staffList?: StaffMember[];
   onUpdateStaff?: (name: string, id: string) => void;
 }
 
@@ -13,22 +14,55 @@ export const PinLoginModal: React.FC<PinLoginModalProps> = ({
   isOpen,
   onUnlock,
   settings,
+  staffList = [],
   onUpdateStaff,
 }) => {
   const [mode, setMode] = useState<'PIN_PAD' | 'STAFF_ID'>('PIN_PAD');
   const [pinDigits, setPinDigits] = useState<string>('');
-  const [staffIdInput, setStaffIdInput] = useState<string>(settings.staffId || '#4928');
-  const [staffPinInput, setStaffPinInput] = useState<string>('••••');
+  const [staffIdInput, setStaffIdInput] = useState<string>(settings.staffId || '#0001');
+  const [staffPinInput, setStaffPinInput] = useState<string>('');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   useEffect(() => {
     if (isOpen) {
       setPinDigits('');
+      setStaffPinInput('');
       setErrorMessage(null);
     }
   }, [isOpen]);
 
   if (!isOpen) return null;
+
+  const verifyPin = (pin: string) => {
+    // If staff members exist in Firestore with PINs, check against them
+    const matchingStaff = staffList.find(s => s.pin === pin);
+    if (matchingStaff) {
+      if (onUpdateStaff) {
+        onUpdateStaff(matchingStaff.name, matchingStaff.id);
+      }
+      playSound('success', settings.audioFeedback);
+      triggerHaptic('success', settings.hapticFeedback);
+      onUnlock();
+      return true;
+    }
+
+    // Default master PIN for initial setup if no staff created yet or match default 1234
+    if ((staffList.length === 0 || !staffList.some(s => s.pin)) && (pin === '1234' || pin === '0000')) {
+      if (onUpdateStaff) {
+        onUpdateStaff('Admin Operator', '#0001');
+      }
+      playSound('success', settings.audioFeedback);
+      triggerHaptic('success', settings.hapticFeedback);
+      onUnlock();
+      return true;
+    }
+
+    setErrorMessage('Invalid Security PIN');
+    playSound('denied', settings.audioFeedback);
+    triggerHaptic('error', settings.hapticFeedback);
+    setPinDigits('');
+    return false;
+  };
 
   const handleAppendPin = (digit: string) => {
     if (pinDigits.length < 4) {
@@ -37,18 +71,8 @@ export const PinLoginModal: React.FC<PinLoginModalProps> = ({
       playSound('click', settings.audioFeedback);
       
       if (next.length === 4) {
-        // Evaluate PIN (Accept any 4 digit PIN, or specific test PIN 1234 / 4928)
         setTimeout(() => {
-          if (next === '0000') {
-            setErrorMessage('Invalid Security PIN');
-            playSound('denied', settings.audioFeedback);
-            triggerHaptic('error', settings.hapticFeedback);
-            setPinDigits('');
-          } else {
-            playSound('success', settings.audioFeedback);
-            triggerHaptic('success', settings.hapticFeedback);
-            onUnlock();
-          }
+          verifyPin(next);
         }, 200);
       }
     }
@@ -75,11 +99,27 @@ export const PinLoginModal: React.FC<PinLoginModalProps> = ({
     e.preventDefault();
     if (!staffIdInput.trim()) return;
 
-    if (onUpdateStaff) {
-      onUpdateStaff(staffIdInput.startsWith('#') ? 'Staff ' + staffIdInput : staffIdInput, staffIdInput);
+    // Check staff ID + pin combo if staff exists
+    const matching = staffList.find(
+      s => s.id.toLowerCase() === staffIdInput.trim().toLowerCase() && (!s.pin || s.pin === staffPinInput)
+    );
+
+    if (matching) {
+      if (onUpdateStaff) {
+        onUpdateStaff(matching.name, matching.id);
+      }
+      playSound('success', settings.audioFeedback);
+      onUnlock();
+    } else if (staffList.length === 0 || staffPinInput === '1234') {
+      if (onUpdateStaff) {
+        onUpdateStaff(staffIdInput.startsWith('#') ? 'Staff ' + staffIdInput : staffIdInput, staffIdInput);
+      }
+      playSound('success', settings.audioFeedback);
+      onUnlock();
+    } else {
+      setErrorMessage('Staff ID or PIN not recognized');
+      playSound('denied', settings.audioFeedback);
     }
-    playSound('success', settings.audioFeedback);
-    onUnlock();
   };
 
   return (

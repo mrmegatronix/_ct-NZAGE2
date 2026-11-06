@@ -19,7 +19,7 @@ export const StatsView: React.FC<StatsViewProps> = ({
   const [exportNotice, setExportNotice] = useState<string | null>(null);
 
   // Dynamic calculations
-  const totalScans = scans.length > 0 ? scans.length : 842;
+  const totalScans = scans.length;
   const refusalsCount = scans.filter((s) => s.status === 'DENIED' || s.status === 'FAKE_FLAG').length;
   
   const validAges = scans
@@ -29,7 +29,7 @@ export const StatsView: React.FC<StatsViewProps> = ({
   const avgAge =
     validAges.length > 0
       ? (validAges.reduce((acc, v) => acc + v, 0) / validAges.length).toFixed(1)
-      : '24.5';
+      : '--';
 
   const maxVolume = Math.max(...hourlyStats.map((h) => h.scans), 1);
 
@@ -153,7 +153,7 @@ export const StatsView: React.FC<StatsViewProps> = ({
           </div>
           <div className="flex items-end justify-between z-10">
             <span className="font-hanken text-[52px] leading-none text-[#ff4b4b] font-extrabold glow-text-red">
-              {refusalsCount > 0 ? refusalsCount : 12}
+              {refusalsCount}
             </span>
             <button
               onClick={onViewRefusals}
