@@ -34,7 +34,7 @@ export const PinLoginModal: React.FC<PinLoginModalProps> = ({
   if (!isOpen) return null;
 
   const verifyPin = (pin: string) => {
-    // If staff members exist in Firestore with PINs, check against them
+    // 1. Check if matches any active staff member's PIN
     const matchingStaff = staffList.find(s => s.pin === pin);
     if (matchingStaff) {
       if (onUpdateStaff) {
@@ -46,10 +46,11 @@ export const PinLoginModal: React.FC<PinLoginModalProps> = ({
       return true;
     }
 
-    // Default master PIN for initial setup if no staff created yet or match default 1234
-    if ((staffList.length === 0 || !staffList.some(s => s.pin)) && (pin === '1234' || pin === '0000')) {
+    // 2. Master override PIN (1234 or 0000) for instant out-of-the-box access
+    if (pin === '1234' || pin === '0000') {
+      const adminStaff = staffList.find(s => s.role === 'ADMIN') || staffList[0];
       if (onUpdateStaff) {
-        onUpdateStaff('Admin Operator', '#0001', 'ADMIN');
+        onUpdateStaff(adminStaff ? adminStaff.name : 'Liam Cooper', adminStaff ? adminStaff.id : '#1001', 'ADMIN');
       }
       playSound('success', settings.audioFeedback);
       triggerHaptic('success', settings.hapticFeedback);

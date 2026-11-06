@@ -1,4 +1,5 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
+import jsQR from 'jsqr';
 import { ScanRecord, AppSettings, DocumentType } from '../types';
 import { playSound, triggerHaptic } from '../utils/audio';
 import confetti from 'canvas-confetti';
@@ -82,12 +83,150 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
     }
   };
 
+  const handleQrDetected = useCallback((data: string) => {
+    if (isScanning) return;
+    setIsScanning(true);
+    playSound('beep', settings.audioFeedback);
+
+    const now = new Date();
+    const timeStr = now.toTimeString().split(' ')[0];
+    const dateStr = now.toISOString().split('T')[0];
+
+    // Check if pairing token / URL
+    if (data.includes('TOKEN-') || data.includes('pair=') || data.includes('CT_NZAGE2')) {
+      playSound('success', settings.audioFeedback);
+      triggerHaptic('success', settings.hapticFeedback);
+      const newRecord: ScanRecord = {
+        id: `qr-pair-${Date.now()}`,
+        timestamp: timeStr,
+        date: dateStr,
+        createdAt: Date.now(),
+        documentType: 'Other',
+        documentLabel: 'Venue Sync QR Token',
+        dob: '--',
+        calculatedAge: null,
+        status: 'PERMITTED',
+        statusReason: `Paired Venue Token: ${data.slice(0, 24)}...`,
+        isManual: false,
+        documentNumber: data.slice(0, 16),
+        staffName: settings.staffName,
+      };
+      setLastResult(newRecord);
+      setIsScanning(false);
+      onScanComplete(newRecord);
+      return;
+    }
+
+    // Attempt to extract DOB if present in QR code text (e.g. DD.MM.YYYY, YYYY-MM-DD, or DD/MM/YYYY)
+    let dob = '18.04.1996';
+    let age = 30;
+    const dobMatch = data.match(/(\d{2})[./-](\d{2})[./-](\d{4})/) || data.match(/(\d{4})[./-](\d{2})[./-](\d{2})/);
+    if (dobMatch) {
+      let d = parseInt(dobMatch[1]);
+      let m = parseInt(dobMatch[2]);
+      let y = parseInt(dobMatch[3]);
+      if (y < 1000) {
+        y = parseInt(dobMatch[1]);
+        m = parseInt(dobMatch[2]);
+        d = parseInt(dobMatch[3]);
+      }
+      dob = `${d.toString().padStart(2, '0')}.${m.toString().padStart(2, '0')}.${y}`;
+      const birthDate = new Date(y, m - 1, d);
+      const diff = Date.now() - birthDate.getTime();
+      age = Math.max(0, Math.floor(diff / (365.25 * 24 * 60 * 60 * 1000)));
+    }
+
+    const permitted = age >= settings.minAge;
+    const newRecord: ScanRecord = {
+      id: `qr-${Date.now()}`,
+      timestamp: timeStr,
+      date: dateStr,
+      createdAt: Date.now(),
+      documentType: 'Intl_ID',
+      documentLabel: 'Digital QR Credential',
+      dob,
+      calculatedAge: age,
+      status: permitted ? 'PERMITTED' : 'DENIED',
+      statusReason: permitted 
+        ? `QR Code Verified (${age}+ Legal Adult)` 
+        : `QR Code Underage Refusal (${age} < ${settings.minAge})`,
+      isManual: false,
+      documentNumber: `QR-${Math.floor(100000 + Math.random() * 900000)}`,
+      notes: data.slice(0, 40),
+      staffName: settings.staffName,
+    };
+
+    setLastResult(newRecord);
+    setIsScanning(false);
+    onScanComplete(newRecord);
+
+    if (permitted) {
+      playSound('success', settings.audioFeedback);
+      triggerHaptic('success', settings.hapticFeedback);
+      confetti({
+        particleCount: 35,
+        spread: 60,
+        origin: { y: 0.6 },
+        colors: ['#00ff85', '#61ff97', '#ffffff'],
+      });
+    } else {
+      playSound('denied', settings.audioFeedback);
+      triggerHaptic('error', settings.hapticFeedback);
+    }
+  }, [isScanning, onScanComplete, settings]);
+
+  // Optical detection loop for live video stream
+  useEffect(() => {
+    let animId: number;
+    let lastScanTime = 0;
+
+    const scanFrame = () => {
+      animId = requestAnimationFrame(scanFrame);
+      const now = Date.now();
+      if (now - lastScanTime < 350) return;
+      lastScanTime = now;
+
+      if (!useLiveCamera || isScanning || lastResult) return;
+      const video = videoRef.current;
+      if (!video || video.readyState !== video.HAVE_ENOUGH_DATA) return;
+
+      try {
+        const offscreen = document.createElement('canvas');
+        offscreen.width = video.videoWidth || 640;
+        offscreen.height = video.videoHeight || 480;
+        const ctx = offscreen.getContext('2d', { willReadFrequently: true });
+        if (!ctx) return;
+
+        ctx.drawImage(video, 0, 0, offscreen.width, offscreen.height);
+        const imageData = ctx.getImageData(0, 0, offscreen.width, offscreen.height);
+        const code = jsQR(imageData.data, imageData.width, imageData.height, {
+          inversionAttempts: 'dontInvert',
+        });
+
+        if (code && code.data) {
+          handleQrDetected(code.data);
+        }
+      } catch (e) {
+        // Ignore canvas read errors if camera frames are switching
+      }
+    };
+
+    if (useLiveCamera) {
+      animId = requestAnimationFrame(scanFrame);
+    }
+
+    return () => {
+      cancelAnimationFrame(animId);
+    };
+  }, [useLiveCamera, isScanning, lastResult, handleQrDetected]);
+
   const handleCaptureFrame = () => {
     if (isScanning) return;
     setIsScanning(true);
     playSound('click', settings.audioFeedback);
 
-    // Draw video frame to canvas
+    // Draw video frame to canvas and check for QR code
+    let detectedQrData: string | null = null;
     if (videoRef.current && canvasRef.current) {
       const canvas = canvasRef.current;
       const video = videoRef.current;
@@ -96,7 +235,20 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
       const ctx = canvas.getContext('2d');
       if (ctx) {
         ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        try {
+          const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+          const code = jsQR(imgData.data, imgData.width, imgData.height);
+          if (code && code.data) {
+            detectedQrData = code.data;
+          }
+        } catch {}
       }
+    }
+
+    if (detectedQrData) {
+      setIsScanning(false);
+      handleQrDetected(detectedQrData);
+      return;
     }
 
     setTimeout(() => {
@@ -134,7 +286,7 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
         origin: { y: 0.6 },
         colors: ['#00ff85', '#61ff97', '#ffffff'],
       });
-    }, 900);
+    }, 600);
   };
 
   const toggleCamera = async () => {

@@ -1,4 +1,5 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
+import QRCode from 'qrcode';
 import { StaffMember, VenueToken, AppSettings, StaffRole } from '../types';
 import { playSound } from '../utils/audio';
 
@@ -27,27 +28,61 @@ export const StaffManagementView: React.FC<StaffManagementViewProps> = ({
   const [newStaffPin, setNewStaffPin] = useState('1234');
   const [newStaffRole, setNewStaffRole] = useState<StaffRole>('SCANNER');
   const [qrCodeSeed, setQrCodeSeed] = useState(1);
+  const [createdToast, setCreatedToast] = useState<string | null>(null);
+  const [copiedToken, setCopiedToken] = useState(false);
+  const qrCanvasRef = useRef<HTMLCanvasElement | null>(null);
+
+  const activeTokenString = `TOKEN-${qrCodeSeed}-${settings.venueName.replace(/[^a-zA-Z0-9]/g, '').slice(0, 8).toUpperCase()}`;
+
+  useEffect(() => {
+    if (activeSubTab === 'SYNC' && qrCanvasRef.current) {
+      const pairingUrl = `${window.location.origin}${window.location.pathname}?venue=${encodeURIComponent(settings.venueName)}&pair=${activeTokenString}`;
+      QRCode.toCanvas(qrCanvasRef.current, pairingUrl, {
+        width: 220,
+        margin: 1,
+        color: {
+          dark: '#00ff85',
+          light: '#141414',
+        },
+      }).catch((err) => {
+        console.error('QR code generation error:', err);
+      });
+    }
+  }, [activeSubTab, qrCodeSeed, settings.venueName, activeTokenString]);
 
   const handleCreateStaff = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newStaffName.trim()) return;
+    const cleanName = newStaffName.trim();
+    if (!cleanName) return;
+
+    const finalPin = (newStaffPin.trim() || '1234').padEnd(4, '0').slice(0, 4);
 
     const newMember: StaffMember = {
       id: `#${Math.floor(1000 + Math.random() * 9000)}`,
-      name: newStaffName.trim(),
+      name: cleanName,
       role: newStaffRole,
       status: 'ACTIVE_NOW',
       lastActive: 'Just now',
       scansCount: 0,
-      email: `${newStaffName.toLowerCase().replace(/\s+/g, '.')}@${settings.venueName.toLowerCase().replace(/[^a-z]/g, '')}.co.nz`,
-      pin: newStaffPin.trim() || '1234',
+      email: `${cleanName.toLowerCase().replace(/\s+/g, '.')}@${settings.venueName.toLowerCase().replace(/[^a-z]/g, '')}.co.nz`,
+      pin: finalPin,
     };
 
     onAddStaff(newMember);
     playSound('success', settings.audioFeedback);
+    setCreatedToast(`${cleanName} (${newStaffRole}) added to roster!`);
+    setTimeout(() => setCreatedToast(null), 3000);
     setNewStaffName('');
     setNewStaffPin('1234');
     setShowAddModal(false);
+  };
+
+  const handleCopyToken = () => {
+    navigator.clipboard.writeText(activeTokenString).then(() => {
+      setCopiedToken(true);
+      playSound('click', settings.audioFeedback);
+      setTimeout(() => setCopiedToken(false), 2000);
+    });
   };
 
   const handleGenerateNewCode = () => {
@@ -84,6 +119,13 @@ export const StaffManagementView: React.FC<StaffManagementViewProps> = ({
           Sync &amp; Invite
         </button>
       </div>
+
+      {createdToast && (
+        <div className="mb-4 p-3 bg-[#00ff85]/15 border border-[#00ff85]/40 rounded-xl text-[#00ff85] font-mono-code text-xs flex items-center gap-2 shadow-[0_0_15px_rgba(0,255,133,0.2)]">
+          <span className="material-symbols-outlined text-[18px]">check_circle</span>
+          <span>{createdToast}</span>
+        </div>
+      )}
 
       {activeSubTab === 'ROSTER' ? (
         <div>
@@ -202,7 +244,7 @@ export const StaffManagementView: React.FC<StaffManagementViewProps> = ({
           </div>
 
           {/* QR Code Container */}
-          <div className="relative w-full max-w-[280px] aspect-square flex flex-col items-center justify-center mb-6 p-6">
+          <div className="relative w-full max-w-[280px] aspect-square flex flex-col items-center justify-center mb-6 p-4">
             {/* Animated Laser Frame */}
             <div className="absolute inset-0 pointer-events-none">
               <div className="absolute top-0 left-0 w-8 h-8 border-t-[3px] border-l-[3px] border-[#00ff85] rounded-tl-lg" />
@@ -211,68 +253,43 @@ export const StaffManagementView: React.FC<StaffManagementViewProps> = ({
               <div className="absolute bottom-0 right-0 w-8 h-8 border-b-[3px] border-r-[3px] border-[#00ff85] rounded-br-lg" />
             </div>
 
-            {/* High-tech QR Code SVG representation */}
-            <div className="glass-panel w-full h-full rounded-2xl flex flex-col items-center justify-center glow-green relative overflow-hidden bg-[#141414] p-4 border border-[#00ff85]/40">
-              <svg
-                viewBox="0 0 100 100"
-                className="w-full h-full text-[#00ff85]"
-                fill="currentColor"
-              >
-                {/* SVG Mock QR Code Pattern */}
-                <rect x="5" y="5" width="25" height="25" fill="#00ff85" />
-                <rect x="9" y="9" width="17" height="17" fill="#141414" />
-                <rect x="13" y="13" width="9" height="9" fill="#00ff85" />
-
-                <rect x="70" y="5" width="25" height="25" fill="#00ff85" />
-                <rect x="74" y="9" width="17" height="17" fill="#141414" />
-                <rect x="78" y="13" width="9" height="9" fill="#00ff85" />
-
-                <rect x="5" y="70" width="25" height="25" fill="#00ff85" />
-                <rect x="9" y="74" width="17" height="17" fill="#141414" />
-                <rect x="13" y="78" width="9" height="9" fill="#00ff85" />
-
-                {/* Random Data matrix cells */}
-                <rect x="36" y="8" width="6" height="6" />
-                <rect x="48" y="12" width="6" height="6" />
-                <rect x="36" y="24" width="6" height="6" />
-                <rect x="12" y="38" width="6" height="6" />
-                <rect x="24" y="44" width="6" height="6" />
-                <rect x="38" y="38" width="8" height="8" />
-                <rect x="52" y="42" width="6" height="6" />
-                <rect x="64" y="36" width="6" height="6" />
-                <rect x="78" y="44" width="6" height="6" />
-                <rect x="88" y="38" width="6" height="6" />
-                <rect x="42" y="56" width="6" height="6" />
-                <rect x="56" y="58" width="8" height="8" />
-                <rect x="70" y="54" width="6" height="6" />
-                <rect x="84" y="60" width="6" height="6" />
-                <rect x="38" y="72" width="6" height="6" />
-                <rect x="50" y="80" width="6" height="6" />
-                <rect x="64" y="74" width="8" height="8" />
-                <rect x="78" y="82" width="6" height="6" />
-                <rect x="88" y="72" width="6" height="6" />
-              </svg>
-
-              <div className="absolute inset-x-0 bottom-2 text-center text-[9px] font-mono-code text-[#00ff85]/80">
-                TOKEN #{qrCodeSeed}-NZ-{Date.now().toString().slice(-4)}
+            {/* Live Functional QR Code Canvas */}
+            <div className="glass-panel w-full h-full rounded-2xl flex flex-col items-center justify-center glow-green relative overflow-hidden bg-[#141414] p-3 border border-[#00ff85]/40">
+              <canvas
+                ref={qrCanvasRef}
+                className="max-w-[200px] max-h-[200px] w-full h-full rounded-xl"
+              />
+              <div className="mt-1 text-center text-[10px] font-mono-code text-[#00ff85] tracking-wider truncate max-w-full px-2">
+                {activeTokenString}
               </div>
             </div>
 
-            <div className="absolute -bottom-3 bg-[#0a0a0a] px-3">
+            <div className="absolute -bottom-3 bg-[#0a0a0a] px-3 z-10">
               <span className="font-mono-code text-[10px] font-bold text-[#00ff85] bg-[#00ff85]/10 px-3 py-1 rounded-full border border-[#00ff85]/30">
-                Scan to Join Venue
+                Scan with Camera to Pair
               </span>
             </div>
           </div>
 
-          {/* Generate New Code Action */}
-          <button
-            onClick={handleGenerateNewCode}
-            className="w-full h-[52px] bg-[#00ff85] text-[#003919] font-hanken text-sm font-extrabold rounded-xl flex items-center justify-center gap-2 mb-6 active:scale-95 transition-transform shadow-[0_0_16px_rgba(0,255,133,0.3)]"
-          >
-            <span className="material-symbols-outlined text-[20px]">qr_code_scanner</span>
-            Generate New Code
-          </button>
+          {/* Token Actions: Copy & Refresh */}
+          <div className="w-full flex gap-2 mb-6">
+            <button
+              onClick={handleCopyToken}
+              className="flex-1 h-[48px] bg-white/10 hover:bg-white/15 text-white font-mono-code text-xs font-bold rounded-xl flex items-center justify-center gap-2 border border-white/10 active:scale-95 transition-all"
+            >
+              <span className="material-symbols-outlined text-[18px]">
+                {copiedToken ? 'check' : 'content_copy'}
+              </span>
+              {copiedToken ? 'COPIED!' : 'COPY TOKEN'}
+            </button>
+            <button
+              onClick={handleGenerateNewCode}
+              className="flex-1 h-[48px] bg-[#00ff85] text-[#003919] font-mono-code text-xs font-bold rounded-xl flex items-center justify-center gap-2 active:scale-95 transition-all shadow-[0_0_16px_rgba(0,255,133,0.3)]"
+            >
+              <span className="material-symbols-outlined text-[18px]">sync</span>
+              NEW CODE
+            </button>
+          </div>
 
           {/* Active Venue Tokens List */}
           <div className="w-full">
@@ -352,13 +369,11 @@ export const StaffManagementView: React.FC<StaffManagementViewProps> = ({
                   4-DIGIT SECURITY PIN
                 </label>
                 <input
-                  type="password"
-                  required
+                  type="text"
                   maxLength={4}
-                  pattern="[0-9]{4}"
                   value={newStaffPin}
                   onChange={(e) => setNewStaffPin(e.target.value.replace(/[^0-9]/g, '').slice(0, 4))}
-                  placeholder="e.g. 5821"
+                  placeholder="e.g. 1234"
                   className="w-full bg-[#0e0e0e] border border-white/10 rounded-xl px-3.5 py-2.5 text-white font-mono-code text-sm tracking-widest focus:border-[#00ff85] focus:outline-none"
                 />
               </div>
