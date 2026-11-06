@@ -159,6 +159,66 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 ))}
               </div>
             </div>
+
+            <div className="pt-3 border-t border-white/10">
+              <div className="flex justify-between items-center mb-1.5">
+                <span className="font-inter text-sm text-white font-semibold">
+                  Max Venue Capacity
+                </span>
+                <span className="font-mono-code text-xs font-bold text-[#00ff85] bg-[#00ff85]/10 px-2 py-0.5 rounded border border-[#00ff85]/30">
+                  {settings.venueCapacity || 150} Patrons
+                </span>
+              </div>
+              <div className="grid grid-cols-4 gap-2">
+                {[50, 100, 150, 250].map((cap) => (
+                  <button
+                    key={cap}
+                    type="button"
+                    onClick={() => {
+                      onUpdateSettings({ venueCapacity: cap });
+                      playSound('click', settings.audioFeedback);
+                    }}
+                    className={`py-2 rounded-xl font-mono-code text-xs transition-all border ${
+                      (settings.venueCapacity || 150) === cap
+                        ? 'bg-[#00ff85]/20 text-[#00ff85] border-[#00ff85]/50 font-bold'
+                        : 'bg-[#0e0e0e] text-[#b9cbb9] border-white/10 hover:bg-white/5'
+                    }`}
+                  >
+                    {cap}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="pt-3 border-t border-white/10">
+              <div className="flex justify-between items-center mb-1.5">
+                <span className="font-inter text-sm text-white font-semibold">
+                  Security Auto-Lock Timeout
+                </span>
+                <span className="font-mono-code text-xs text-[#b9cbb9]">
+                  {(settings.autoLockMinutes || 0) === 0 ? 'Disabled' : `${settings.autoLockMinutes} Minutes`}
+                </span>
+              </div>
+              <div className="grid grid-cols-4 gap-2">
+                {[0, 1, 5, 15].map((mins) => (
+                  <button
+                    key={mins}
+                    type="button"
+                    onClick={() => {
+                      onUpdateSettings({ autoLockMinutes: mins });
+                      playSound('click', settings.audioFeedback);
+                    }}
+                    className={`py-2 rounded-xl font-mono-code text-xs transition-all border ${
+                      (settings.autoLockMinutes ?? 5) === mins
+                        ? 'bg-[#00ff85]/20 text-[#00ff85] border-[#00ff85]/50 font-bold'
+                        : 'bg-[#0e0e0e] text-[#b9cbb9] border-white/10 hover:bg-white/5'
+                    }`}
+                  >
+                    {mins === 0 ? 'Off' : `${mins}m`}
+                  </button>
+                ))}
+              </div>
+            </div>
           </div>
         </section>
 

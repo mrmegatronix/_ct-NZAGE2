@@ -23,11 +23,34 @@ export default function App() {
   const [isLocked, setIsLocked] = useState(false);
 
   // Firebase State Hooks
-  const { settings, updateSettings } = useFirebaseSettings();
+  const { settings, updateSettings, adjustPatronCount } = useFirebaseSettings();
   const { scans, addScan, deleteScan, purgeScans } = useFirebaseScans(settings.autoPurgeHours);
   const { staffList, addStaff, deleteStaff, incrementStaffScanCount } = useFirebaseStaff();
   const { tokens, addToken, deleteToken } = useFirebaseTokens();
   const { hourlyStats, updateHourStat, resetStats } = useFirebaseHourlyStats();
+
+  // Idle Auto-Lock Timer
+  useEffect(() => {
+    const lockMinutes = settings.autoLockMinutes ?? 5;
+    if (lockMinutes <= 0 || isLocked) return;
+
+    let timer: NodeJS.Timeout;
+    const resetTimer = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        setIsLocked(true);
+      }, lockMinutes * 60 * 1000);
+    };
+
+    resetTimer();
+    const events = ['mousedown', 'mousemove', 'keypress', 'scroll', 'touchstart'];
+    events.forEach((evt) => window.addEventListener(evt, resetTimer));
+
+    return () => {
+      clearTimeout(timer);
+      events.forEach((evt) => window.removeEventListener(evt, resetTimer));
+    };
+  }, [settings.autoLockMinutes, isLocked]);
 
   // Global Keyboard Navigation (Digital Signage protocol)
   useEffect(() => {
@@ -59,12 +82,25 @@ export default function App() {
   }, []);
 
   // Handlers
+  const handleSelectTab = (tab: ActiveTab) => {
+    if ((settings.staffRole === 'WAIT STAFF' || settings.staffRole === 'WAIT_STAFF') && (tab === 'settings' || tab === 'staff' || tab === 'sync')) {
+      setIsLocked(true);
+      return;
+    }
+    setCurrentTab(tab);
+  };
+
   const handleScanOrVerifyComplete = (record: ScanRecord) => {
     addScan(record);
 
     // Increment scan counter on active staff if exists
     if (settings.staffId) {
       incrementStaffScanCount(settings.staffId);
+    }
+
+    // Adjust live patron count on permitted entry
+    if (record.status === 'PERMITTED') {
+      adjustPatronCount(1);
     }
 
     // Update hourly stats volume
@@ -128,9 +164,10 @@ export default function App() {
       {/* Top App Bar */}
       <TopAppBar
         currentTab={currentTab}
-        onSelectTab={setCurrentTab}
+        onSelectTab={handleSelectTab}
         onLockClick={() => setIsLocked(true)}
         settings={settings}
+        onAdjustPatrons={adjustPatronCount}
       />
 
       {/* Main Layout Container */}
@@ -138,7 +175,7 @@ export default function App() {
         {/* Desktop Sidebar / Navigation */}
         <BottomNavBar
           currentTab={currentTab}
-          onSelectTab={setCurrentTab}
+          onSelectTab={handleSelectTab}
           unreadCount={scans.filter((s) => s.status === 'DENIED').length}
         />
 
@@ -206,8 +243,8 @@ export default function App() {
         onUnlock={() => setIsLocked(false)}
         settings={settings}
         staffList={staffList}
-        onUpdateStaff={(name, id) => {
-          updateSettings({ staffName: name, staffId: id });
+        onUpdateStaff={(name, id, role) => {
+          updateSettings({ staffName: name, staffId: id, staffRole: role || 'ADMIN' });
         }}
       />
     </div>

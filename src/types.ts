@@ -68,6 +68,10 @@ export interface AppSettings {
   torchEnabled: boolean;
   staffName: string;
   staffId: string;
+  staffRole?: StaffRole;
+  venueCapacity?: number;
+  currentPatronCount?: number;
+  autoLockMinutes?: number;
 }
 
 export type ActiveTab = 'scanner' | 'history' | 'manual' | 'stats' | 'settings' | 'staff' | 'sync';

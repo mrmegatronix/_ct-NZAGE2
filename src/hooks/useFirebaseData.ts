@@ -24,7 +24,11 @@ export const INITIAL_SETTINGS: AppSettings = {
   scannerStyle: 'cyber-bracket',
   torchEnabled: false,
   staffName: 'Admin Operator',
-  staffId: '#0001'
+  staffId: '#0001',
+  staffRole: 'ADMIN',
+  venueCapacity: 150,
+  currentPatronCount: 0,
+  autoLockMinutes: 5,
 };
 
 export function useFirebaseScans(autoPurgeHours: number = 24) {
@@ -93,7 +97,15 @@ export function useFirebaseSettings() {
     await updateDoc(doc(db, 'config', 'settings'), updated);
   };
 
-  return { settings, updateSettings };
+  const adjustPatronCount = async (delta: number) => {
+    const current = settings.currentPatronCount || 0;
+    const nextCount = Math.max(0, current + delta);
+    await updateDoc(doc(db, 'config', 'settings'), {
+      currentPatronCount: nextCount
+    });
+  };
+
+  return { settings, updateSettings, adjustPatronCount };
 }
 
 export function useFirebaseStaff() {

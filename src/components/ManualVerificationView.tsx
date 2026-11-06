@@ -14,6 +14,7 @@ export const ManualVerificationView: React.FC<ManualVerificationViewProps> = ({
 }) => {
   const [selectedDoc, setSelectedDoc] = useState<DocumentType>('NZDL');
   const [inputDigits, setInputDigits] = useState<string>('');
+  const [tableNumber, setTableNumber] = useState<string>('');
   const [calculatedAge, setCalculatedAge] = useState<number | null>(null);
   const [calcStatus, setCalcStatus] = useState<'IDLE' | 'PERMITTED' | 'DENIED' | 'CHECK_DATE' | 'ERROR'>('IDLE');
   const [statusMessage, setStatusMessage] = useState<string>('AWAITING INPUT');
@@ -129,6 +130,7 @@ export const ManualVerificationView: React.FC<ManualVerificationViewProps> = ({
       isManual: true,
       documentNumber: `MAN-${Math.floor(10000 + Math.random() * 90000)}`,
       staffName: settings.staffName,
+      notes: tableNumber.trim() ? `Table/Area: ${tableNumber.trim()}` : undefined,
     };
 
     onVerifyComplete(record);
@@ -218,6 +220,23 @@ export const ManualVerificationView: React.FC<ManualVerificationViewProps> = ({
               );
             })}
           </div>
+        </div>
+
+        {/* Location / Table Tag for Floor & Wait Staff */}
+        <div className="flex items-center gap-2 px-3 py-2 rounded-xl bg-black/40 border border-white/10">
+          <span className="material-symbols-outlined text-[18px] text-[#38bdf8]">
+            restaurant
+          </span>
+          <span className="font-mono-code text-[10px] text-[#b9cbb9] tracking-wider whitespace-nowrap uppercase">
+            TABLE / AREA:
+          </span>
+          <input
+            type="text"
+            value={tableNumber}
+            onChange={(e) => setTableNumber(e.target.value)}
+            placeholder="e.g. Table 4, Bar, Patio"
+            className="w-full bg-transparent border-none text-white font-mono-code text-xs focus:outline-none placeholder:text-white/30"
+          />
         </div>
 
         {/* DOB Display Card */}

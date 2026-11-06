@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { AppSettings, StaffMember } from '../types';
+import { AppSettings, StaffMember, StaffRole } from '../types';
 import { playSound, triggerHaptic } from '../utils/audio';
 
 interface PinLoginModalProps {
@@ -7,7 +7,7 @@ interface PinLoginModalProps {
   onUnlock: () => void;
   settings: AppSettings;
   staffList?: StaffMember[];
-  onUpdateStaff?: (name: string, id: string) => void;
+  onUpdateStaff?: (name: string, id: string, role?: StaffRole) => void;
 }
 
 export const PinLoginModal: React.FC<PinLoginModalProps> = ({
@@ -38,7 +38,7 @@ export const PinLoginModal: React.FC<PinLoginModalProps> = ({
     const matchingStaff = staffList.find(s => s.pin === pin);
     if (matchingStaff) {
       if (onUpdateStaff) {
-        onUpdateStaff(matchingStaff.name, matchingStaff.id);
+        onUpdateStaff(matchingStaff.name, matchingStaff.id, matchingStaff.role);
       }
       playSound('success', settings.audioFeedback);
       triggerHaptic('success', settings.hapticFeedback);
@@ -49,7 +49,7 @@ export const PinLoginModal: React.FC<PinLoginModalProps> = ({
     // Default master PIN for initial setup if no staff created yet or match default 1234
     if ((staffList.length === 0 || !staffList.some(s => s.pin)) && (pin === '1234' || pin === '0000')) {
       if (onUpdateStaff) {
-        onUpdateStaff('Admin Operator', '#0001');
+        onUpdateStaff('Admin Operator', '#0001', 'ADMIN');
       }
       playSound('success', settings.audioFeedback);
       triggerHaptic('success', settings.hapticFeedback);
@@ -106,13 +106,13 @@ export const PinLoginModal: React.FC<PinLoginModalProps> = ({
 
     if (matching) {
       if (onUpdateStaff) {
-        onUpdateStaff(matching.name, matching.id);
+        onUpdateStaff(matching.name, matching.id, matching.role);
       }
       playSound('success', settings.audioFeedback);
       onUnlock();
     } else if (staffList.length === 0 || staffPinInput === '1234') {
       if (onUpdateStaff) {
-        onUpdateStaff(staffIdInput.startsWith('#') ? 'Staff ' + staffIdInput : staffIdInput, staffIdInput);
+        onUpdateStaff(staffIdInput.startsWith('#') ? 'Staff ' + staffIdInput : staffIdInput, staffIdInput, 'SCANNER');
       }
       playSound('success', settings.audioFeedback);
       onUnlock();
