@@ -30,10 +30,12 @@ export interface ScanRecord {
   staffName?: string;
 }
 
+export type StaffRole = 'ADMIN' | 'SCANNER' | 'SUPERVISOR' | 'WAIT STAFF' | 'WAIT_STAFF';
+
 export interface StaffMember {
   id: string;
   name: string;
-  role: 'ADMIN' | 'SCANNER' | 'SUPERVISOR';
+  role: StaffRole;
   status: 'ACTIVE_NOW' | 'LAST_2H' | 'LAST_YESTERDAY' | 'OFFLINE';
   lastActive: string;
   scansCount: number;

@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { StaffMember, VenueToken, AppSettings } from '../types';
+import { StaffMember, VenueToken, AppSettings, StaffRole } from '../types';
 import { playSound } from '../utils/audio';
 
 interface StaffManagementViewProps {
@@ -25,7 +25,7 @@ export const StaffManagementView: React.FC<StaffManagementViewProps> = ({
   const [showAddModal, setShowAddModal] = useState(false);
   const [newStaffName, setNewStaffName] = useState('');
   const [newStaffPin, setNewStaffPin] = useState('1234');
-  const [newStaffRole, setNewStaffRole] = useState<'ADMIN' | 'SCANNER' | 'SUPERVISOR'>('SCANNER');
+  const [newStaffRole, setNewStaffRole] = useState<StaffRole>('SCANNER');
   const [qrCodeSeed, setQrCodeSeed] = useState(1);
 
   const handleCreateStaff = (e: React.FormEvent) => {
@@ -126,7 +126,7 @@ export const StaffManagementView: React.FC<StaffManagementViewProps> = ({
                     <div className="flex items-center gap-3.5">
                       <div className="w-12 h-12 rounded-full bg-white/5 border border-white/10 flex items-center justify-center text-white">
                         <span className="material-symbols-outlined text-[24px]">
-                          {isAdmin ? 'admin_panel_settings' : 'badge'}
+                          {isAdmin ? 'admin_panel_settings' : (staff.role === 'WAIT STAFF' || staff.role === 'WAIT_STAFF') ? 'restaurant' : 'badge'}
                         </span>
                       </div>
 
@@ -370,12 +370,13 @@ export const StaffManagementView: React.FC<StaffManagementViewProps> = ({
                 <select
                   value={newStaffRole}
                   onChange={(e) =>
-                    setNewStaffRole(e.target.value as 'ADMIN' | 'SCANNER' | 'SUPERVISOR')
+                    setNewStaffRole(e.target.value as StaffRole)
                   }
                   className="w-full bg-[#0e0e0e] border border-white/10 rounded-xl px-3.5 py-2.5 text-white font-inter text-sm focus:border-[#00ff85] focus:outline-none"
                 >
                   <option value="SCANNER">Scanner (Door Staff)</option>
                   <option value="SUPERVISOR">Supervisor / Floor Lead</option>
+                  <option value="WAIT STAFF">Wait Staff</option>
                   <option value="ADMIN">Admin (Full Permissions)</option>
                 </select>
               </div>
