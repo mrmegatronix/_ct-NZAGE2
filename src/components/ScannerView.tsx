@@ -1,8 +1,10 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
+import { BrowserMultiFormatReader, BarcodeFormat, DecodeHintType } from '@zxing/library';
 import jsQR from 'jsqr';
+import { createWorker } from 'tesseract.js';
 import { ScanRecord, AppSettings, DocumentType, ScanStatus } from '../types';
 import { playSound, triggerHaptic } from '../utils/audio';
-import { parseIdBarcode, calculateAge, formatDob, parseDateString } from '../utils/idParser';
+import { parseIdBarcode, extractDobFromOcrText, calculateAge, formatDob } from '../utils/idParser';
 import confetti from 'canvas-confetti';
 
 interface ScannerViewProps {
@@ -19,6 +21,7 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
   const [torchActive, setTorchActive] = useState(false);
   const [useLiveCamera, setUseLiveCamera] = useState(true);
   const [isScanning, setIsScanning] = useState(false);
+  const [scanStatusText, setScanStatusText] = useState('ANALYZING ID DOCUMENT...');
   const [lastResult, setLastResult] = useState<ScanRecord | null>(null);
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [showSimulator, setShowSimulator] = useState(false);
@@ -43,7 +46,7 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
           audio: false,
         });
         if (!active) {
-          stream.getTracks().forEach(t => t.stop());
+          stream.getTracks().forEach((t) => t.stop());
           return;
         }
         streamRef.current = stream;
@@ -54,7 +57,7 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
         setCameraError(null);
       } catch {
         if (active) {
-          setCameraError('Camera access unavailable. Using optical snapshot mode.');
+          setCameraError('Camera access unavailable. Using optical card snapshot mode.');
           setUseLiveCamera(false);
         }
       }
@@ -80,7 +83,7 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
       if (track && 'applyConstraints' in track) {
         try {
           await (track as any).applyConstraints({
-            advanced: [{ torch: nextTorch }]
+            advanced: [{ torch: nextTorch }],
           });
         } catch {
           // Hardware torch unsupported
@@ -90,129 +93,117 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
   };
 
   // Process decoded raw string from Barcode / PDF417 / QR
-  const handleDecodedBarcode = useCallback((rawText: string) => {
-    if (isScanning) return;
-    setIsScanning(true);
-    playSound('beep', settings.audioFeedback);
+  const handleDecodedBarcode = useCallback(
+    (rawText: string) => {
+      if (isScanning) return;
+      setIsScanning(true);
+      playSound('beep', settings.audioFeedback);
 
-    const now = new Date();
-    const timeStr = now.toTimeString().split(' ')[0];
-    const dateStr = now.toISOString().split('T')[0];
+      const now = new Date();
+      const timeStr = now.toTimeString().split(' ')[0];
+      const dateStr = now.toISOString().split('T')[0];
 
-    const parsed = parseIdBarcode(rawText, settings.minAge);
-    if (parsed) {
-      const newRecord: ScanRecord = {
-        id: `scan-${Date.now()}`,
-        timestamp: timeStr,
-        date: dateStr,
-        createdAt: Date.now(),
-        documentType: parsed.documentType,
-        documentLabel: parsed.documentLabel,
-        dob: parsed.dob,
-        calculatedAge: parsed.calculatedAge,
-        status: parsed.status,
-        statusReason: parsed.statusReason,
-        isManual: false,
-        documentNumber: parsed.documentNumber,
-        notes: parsed.notes,
-        staffName: settings.staffName,
-      };
+      const parsed = parseIdBarcode(rawText, settings.minAge);
+      if (parsed) {
+        const newRecord: ScanRecord = {
+          id: `scan-${Date.now()}`,
+          timestamp: timeStr,
+          date: dateStr,
+          createdAt: Date.now(),
+          documentType: parsed.documentType,
+          documentLabel: parsed.documentLabel,
+          dob: parsed.dob,
+          calculatedAge: parsed.calculatedAge,
+          status: parsed.status,
+          statusReason: parsed.statusReason,
+          isManual: false,
+          documentNumber: parsed.documentNumber,
+          notes: parsed.notes,
+          staffName: settings.staffName,
+        };
 
-      setLastResult(newRecord);
-      setIsScanning(false);
-      onScanComplete(newRecord);
+        setLastResult(newRecord);
+        setIsScanning(false);
+        onScanComplete(newRecord);
 
-      if (parsed.status === 'PERMITTED') {
-        playSound('success', settings.audioFeedback);
-        triggerHaptic('success', settings.hapticFeedback);
-        confetti({
-          particleCount: 35,
-          spread: 60,
-          origin: { y: 0.6 },
-          colors: ['#00ff85', '#61ff97', '#ffffff'],
-        });
-      } else {
-        playSound('denied', settings.audioFeedback);
-        triggerHaptic('error', settings.hapticFeedback);
-      }
-    } else {
-      // Unrecognized barcode payload - prompt optical confirmation
-      setIsScanning(false);
-      setModalDobDigits('');
-      setShowDobModal(true);
-    }
-  }, [isScanning, onScanComplete, settings]);
-
-  // Optical detection loop for live video stream
-  useEffect(() => {
-    let animId: number;
-    let lastScanTime = 0;
-    let detector: any = null;
-
-    if (typeof window !== 'undefined' && 'BarcodeDetector' in window) {
-      try {
-        detector = new (window as any).BarcodeDetector({
-          formats: ['pdf417', 'qr_code', 'code_128', 'code_39', 'data_matrix']
-        });
-      } catch (e) {
-        console.warn('BarcodeDetector initialization:', e);
-      }
-    }
-
-    const scanFrame = async () => {
-      animId = requestAnimationFrame(scanFrame);
-      const now = Date.now();
-      if (now - lastScanTime < 300) return;
-      lastScanTime = now;
-
-      if (!useLiveCamera || isScanning || lastResult || showDobModal) return;
-      const video = videoRef.current;
-      if (!video || video.readyState !== video.HAVE_ENOUGH_DATA) return;
-
-      // 1. Try native BarcodeDetector (PDF417 on driver licenses + 2D codes)
-      if (detector) {
-        try {
-          const barcodes = await detector.detect(video);
-          if (barcodes && barcodes.length > 0 && barcodes[0].rawValue) {
-            handleDecodedBarcode(barcodes[0].rawValue);
-            return;
-          }
-        } catch {}
-      }
-
-      // 2. Fallback to jsQR
-      try {
-        const offscreen = document.createElement('canvas');
-        offscreen.width = video.videoWidth || 640;
-        offscreen.height = video.videoHeight || 480;
-        const ctx = offscreen.getContext('2d', { willReadFrequently: true });
-        if (!ctx) return;
-
-        ctx.drawImage(video, 0, 0, offscreen.width, offscreen.height);
-        const imageData = ctx.getImageData(0, 0, offscreen.width, offscreen.height);
-        const code = jsQR(imageData.data, imageData.width, imageData.height, {
-          inversionAttempts: 'dontInvert',
-        });
-
-        if (code && code.data) {
-          handleDecodedBarcode(code.data);
+        if (parsed.status === 'PERMITTED') {
+          playSound('success', settings.audioFeedback);
+          triggerHaptic('success', settings.hapticFeedback);
+          confetti({
+            particleCount: 35,
+            spread: 60,
+            origin: { y: 0.6 },
+            colors: ['#00ff85', '#61ff97', '#ffffff'],
+          });
+        } else {
+          playSound('denied', settings.audioFeedback);
+          triggerHaptic('error', settings.hapticFeedback);
         }
-      } catch {}
+      } else {
+        // Unrecognized barcode string format - prompt optical confirmation
+        setIsScanning(false);
+        setModalDobDigits('');
+        setShowDobModal(true);
+      }
+    },
+    [isScanning, onScanComplete, settings]
+  );
+
+  // Real-time ZXing Multi-Format (PDF417 + QR + 1D) Live Camera Loop
+  useEffect(() => {
+    let isRunning = true;
+    const hints = new Map();
+    hints.set(DecodeHintType.POSSIBLE_FORMATS, [
+      BarcodeFormat.PDF_417,
+      BarcodeFormat.QR_CODE,
+      BarcodeFormat.CODE_128,
+      BarcodeFormat.CODE_39,
+      BarcodeFormat.DATA_MATRIX,
+      BarcodeFormat.AZTEC,
+    ]);
+    const reader = new BrowserMultiFormatReader(hints);
+
+    let lastDecodeTime = 0;
+    const scanLoop = async () => {
+      if (!isRunning) return;
+      const now = Date.now();
+      if (now - lastDecodeTime > 250 && useLiveCamera && !isScanning && !lastResult && !showDobModal) {
+        lastDecodeTime = now;
+        const video = videoRef.current;
+        if (video && video.readyState >= 2) {
+          try {
+            const zxResult = await reader.decodeFromVideoElement(video);
+            if (zxResult && zxResult.getText()) {
+              handleDecodedBarcode(zxResult.getText());
+            }
+          } catch {
+            // ZXing throws NotFoundException when no code is in frame
+          }
+        }
+      }
+
+      if (isRunning) {
+        requestAnimationFrame(scanLoop);
+      }
     };
 
     if (useLiveCamera) {
-      animId = requestAnimationFrame(scanFrame);
+      requestAnimationFrame(scanLoop);
     }
 
     return () => {
-      cancelAnimationFrame(animId);
+      isRunning = false;
+      try {
+        reader.reset();
+      } catch {}
     };
   }, [useLiveCamera, isScanning, lastResult, showDobModal, handleDecodedBarcode]);
 
-  // Capture button clicked
+  // Capture Button: Barcode -> jsQR -> Tesseract OCR -> Optical Sheet
   const handleCaptureFrame = async () => {
     if (isScanning) return;
     setIsScanning(true);
+    setScanStatusText('SCANNING CARD BARCODE...');
     playSound('click', settings.audioFeedback);
 
     let frameDataUrl: string | null = null;
@@ -221,28 +212,33 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
     if (videoRef.current && canvasRef.current) {
       const canvas = canvasRef.current;
       const video = videoRef.current;
-      canvas.width = video.videoWidth || 640;
-      canvas.height = video.videoHeight || 480;
+      canvas.width = video.videoWidth || 1280;
+      canvas.height = video.videoHeight || 720;
       const ctx = canvas.getContext('2d');
       if (ctx) {
         ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
         try {
-          frameDataUrl = canvas.toDataURL('image/jpeg', 0.85);
-          
-          // Try BarcodeDetector on canvas
-          if (typeof window !== 'undefined' && 'BarcodeDetector' in window) {
+          frameDataUrl = canvas.toDataURL('image/jpeg', 0.9);
+
+          // 1. Try ZXing on captured frame data URL
+          if (frameDataUrl) {
+            const hints = new Map();
+            hints.set(DecodeHintType.POSSIBLE_FORMATS, [
+              BarcodeFormat.PDF_417,
+              BarcodeFormat.QR_CODE,
+              BarcodeFormat.CODE_128,
+              BarcodeFormat.CODE_39,
+            ]);
+            const reader = new BrowserMultiFormatReader(hints);
             try {
-              const detector = new (window as any).BarcodeDetector({
-                formats: ['pdf417', 'qr_code', 'code_128', 'code_39', 'data_matrix']
-              });
-              const codes = await detector.detect(canvas);
-              if (codes && codes.length > 0 && codes[0].rawValue) {
-                detectedRaw = codes[0].rawValue;
+              const zxResult = await reader.decodeFromImageUrl(frameDataUrl);
+              if (zxResult && zxResult.getText()) {
+                detectedRaw = zxResult.getText();
               }
             } catch {}
           }
 
-          // Try jsQR if no barcode found yet
+          // 2. Try jsQR
           if (!detectedRaw) {
             const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
             const qr = jsQR(imgData.data, imgData.width, imgData.height);
@@ -250,7 +246,9 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
               detectedRaw = qr.data;
             }
           }
-        } catch {}
+        } catch (err) {
+          console.warn('Canvas frame capture error:', err);
+        }
       }
     }
 
@@ -260,14 +258,67 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
       return;
     }
 
-    // No barcode was found in optical frame - show DOB confirmation modal with captured frame
+    // 3. Try Client-Side OCR on Card Face
+    if (frameDataUrl) {
+      setScanStatusText('READING PRINTED DOB (OCR)...');
+      try {
+        const worker = await createWorker('eng');
+        const ret = await worker.recognize(frameDataUrl);
+        await worker.terminate();
+
+        if (ret && ret.data && ret.data.text) {
+          const ocrResult = extractDobFromOcrText(ret.data.text, settings.minAge);
+          if (ocrResult) {
+            const now = new Date();
+            const record: ScanRecord = {
+              id: `scan-${Date.now()}`,
+              timestamp: now.toTimeString().split(' ')[0],
+              date: now.toISOString().split('T')[0],
+              createdAt: Date.now(),
+              documentType: ocrResult.documentType,
+              documentLabel: ocrResult.documentLabel,
+              dob: ocrResult.dob,
+              calculatedAge: ocrResult.calculatedAge,
+              status: ocrResult.status,
+              statusReason: ocrResult.statusReason,
+              isManual: false,
+              documentNumber: ocrResult.documentNumber,
+              staffName: settings.staffName,
+            };
+
+            setLastResult(record);
+            setIsScanning(false);
+            onScanComplete(record);
+
+            if (ocrResult.status === 'PERMITTED') {
+              playSound('success', settings.audioFeedback);
+              triggerHaptic('success', settings.hapticFeedback);
+              confetti({
+                particleCount: 35,
+                spread: 60,
+                origin: { y: 0.6 },
+                colors: ['#00ff85', '#61ff97', '#ffffff'],
+              });
+            } else {
+              playSound('denied', settings.audioFeedback);
+              triggerHaptic('error', settings.hapticFeedback);
+            }
+            return;
+          }
+        }
+      } catch (ocrErr) {
+        console.warn('OCR processing error, opening verification confirmation:', ocrErr);
+      }
+    }
+
+    // 4. Fallback to Optical Confirmation Sheet (shows actual photo taken)
     setIsScanning(false);
     setCapturedPhotoUrl(frameDataUrl);
     setModalDobDigits('');
     setShowDobModal(true);
   };
 
-  // Submit confirmed DOB from optical modal
+  // Confirm DOB from Optical Sheet
   const handleConfirmOpticalDob = (digits: string, docType: DocumentType) => {
     if (digits.length !== 8) return;
     const day = parseInt(digits.substring(0, 2), 10);
@@ -289,10 +340,10 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
     const labelMap: Record<DocumentType, string> = {
       NZDL: 'NZ Driver Licence (Optical)',
       NZ_Passport: 'NZ Passport (Optical)',
-      R18_Card: '18+ Kiwi Access Card (Optical)',
+      R18_Card: '18+ Kiwi Access (Optical)',
       Intl_Passport: 'International Passport (Optical)',
       Intl_ID: 'International ID Card (Optical)',
-      Other: 'National ID Card (Optical)'
+      Other: 'National ID Card (Optical)',
     };
 
     const newRecord: ScanRecord = {
@@ -306,7 +357,7 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
       calculatedAge: calculatedAge,
       status: permitted ? 'PERMITTED' : 'DENIED',
       statusReason: permitted
-        ? `Optical Card Verified (${calculatedAge}+ Legal Adult)`
+        ? `Optical Verified (${calculatedAge}+ Legal Adult)`
         : `Underage Patron Refusal (${calculatedAge} < ${settings.minAge})`,
       isManual: false,
       documentNumber: `OPT-${Math.floor(100000 + Math.random() * 900000)}`,
@@ -423,7 +474,7 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
         playSound('warning', settings.audioFeedback);
         triggerHaptic('warning', settings.hapticFeedback);
       }
-    }, 400);
+    }, 300);
   };
 
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -431,6 +482,7 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
     if (!file) return;
 
     setIsScanning(true);
+    setScanStatusText('ANALYZING UPLOADED ID...');
     const reader = new FileReader();
     reader.onload = async (ev) => {
       const src = ev.target?.result as string;
@@ -443,33 +495,59 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
         if (ctx) {
           ctx.drawImage(img, 0, 0);
 
-          // 1. Try BarcodeDetector
-          if (typeof window !== 'undefined' && 'BarcodeDetector' in window) {
-            try {
-              const detector = new (window as any).BarcodeDetector({
-                formats: ['pdf417', 'qr_code', 'code_128', 'code_39', 'data_matrix']
-              });
-              const codes = await detector.detect(offscreen);
-              if (codes && codes.length > 0 && codes[0].rawValue) {
-                setIsScanning(false);
-                handleDecodedBarcode(codes[0].rawValue);
-                return;
-              }
-            } catch {}
-          }
-
-          // 2. Try jsQR
+          // 1. Try ZXing Barcode / PDF417
           try {
-            const imgData = ctx.getImageData(0, 0, img.width, img.height);
-            const qr = jsQR(imgData.data, imgData.width, imgData.height);
-            if (qr && qr.data) {
+            const hints = new Map();
+            hints.set(DecodeHintType.POSSIBLE_FORMATS, [
+              BarcodeFormat.PDF_417,
+              BarcodeFormat.QR_CODE,
+              BarcodeFormat.CODE_128,
+              BarcodeFormat.CODE_39,
+            ]);
+            const zxReader = new BrowserMultiFormatReader(hints);
+            const zxResult = await zxReader.decodeFromImageElement(img);
+            if (zxResult && zxResult.getText()) {
               setIsScanning(false);
-              handleDecodedBarcode(qr.data);
+              handleDecodedBarcode(zxResult.getText());
               return;
             }
           } catch {}
 
-          // 3. If no barcode found on image, open optical DOB confirmation
+          // 2. Try OCR on image
+          try {
+            const worker = await createWorker('eng');
+            const ret = await worker.recognize(src);
+            await worker.terminate();
+
+            if (ret && ret.data && ret.data.text) {
+              const ocrResult = extractDobFromOcrText(ret.data.text, settings.minAge);
+              if (ocrResult) {
+                const now = new Date();
+                const record: ScanRecord = {
+                  id: `scan-${Date.now()}`,
+                  timestamp: now.toTimeString().split(' ')[0],
+                  date: now.toISOString().split('T')[0],
+                  createdAt: Date.now(),
+                  documentType: ocrResult.documentType,
+                  documentLabel: ocrResult.documentLabel,
+                  dob: ocrResult.dob,
+                  calculatedAge: ocrResult.calculatedAge,
+                  status: ocrResult.status,
+                  statusReason: ocrResult.statusReason,
+                  isManual: false,
+                  documentNumber: ocrResult.documentNumber,
+                  staffName: settings.staffName,
+                };
+
+                setLastResult(record);
+                setIsScanning(false);
+                onScanComplete(record);
+                return;
+              }
+            }
+          } catch {}
+
+          // 3. Prompt with image preview
           setIsScanning(false);
           setCapturedPhotoUrl(src);
           setModalDobDigits('');
@@ -487,7 +565,9 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
       <div className="flex items-center justify-between w-full mb-3 px-2">
         <div className="flex items-center gap-1.5 text-[#00e476]">
           <span className="material-symbols-outlined text-[16px]">lock</span>
-          <span className="text-[10px] font-mono-code font-bold tracking-wider">SECURE_LINK ACTIVE</span>
+          <span className="text-[10px] font-mono-code font-bold tracking-wider">
+            OPTICAL SCANNER ACTIVE
+          </span>
         </div>
         <div className="flex items-center gap-2">
           <button
@@ -509,7 +589,7 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
       )}
 
       {/* Main Viewfinder Box */}
-      <div 
+      <div
         id="scanner-view"
         className={`w-full aspect-[4/3] rounded-3xl relative overflow-hidden bg-black/90 border transition-all duration-300 flex items-center justify-center mb-4 select-none ${
           lastResult
@@ -575,10 +655,10 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
 
         {/* Scanning Spinner Overlay */}
         {isScanning && (
-          <div className="absolute inset-0 bg-black/70 backdrop-blur-sm flex flex-col items-center justify-center z-30">
-            <div className="w-12 h-12 border-3 border-[#00ff85] border-t-transparent rounded-full animate-spin mb-2" />
-            <div className="font-mono-code text-xs font-bold text-[#00ff85] tracking-widest animate-pulse">
-              ANALYZING ID CREDENTIAL...
+          <div className="absolute inset-0 bg-black/75 backdrop-blur-sm flex flex-col items-center justify-center z-30">
+            <div className="w-12 h-12 border-3 border-[#00ff85] border-t-transparent rounded-full animate-spin mb-3" />
+            <div className="font-mono-code text-xs font-bold text-[#00ff85] tracking-widest animate-pulse text-center px-4">
+              {scanStatusText}
             </div>
           </div>
         )}
@@ -600,7 +680,7 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
       </div>
 
       {/* Dynamic Status / Result Card */}
-      <div 
+      <div
         id="status-card"
         className={`w-full rounded-2xl p-5 border transition-all duration-300 ${
           lastResult
@@ -695,10 +775,10 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
               qr_code_scanner
             </span>
             <div className="font-hanken text-lg font-bold text-white mb-0.5">
-              Ready to Verify
+              Ready to Scan
             </div>
             <p className="font-inter text-xs text-[#b9cbb9]/70">
-              Point camera at Driver License PDF417 barcode or ID card.
+              Show Driver License barcode or front photo to camera.
             </p>
           </div>
         )}
@@ -747,7 +827,9 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
               }
               className="p-2.5 bg-white/5 hover:bg-[#00ff85]/20 border border-white/10 hover:border-[#00ff85]/50 rounded-xl text-left transition-all active:scale-95"
             >
-              <div className="text-[10px] font-mono-code text-[#00ff85] font-bold">PASS: ADULT (27)</div>
+              <div className="text-[10px] font-mono-code text-[#00ff85] font-bold">
+                PASS: ADULT ({calculateAge(5, 8, 1999)})
+              </div>
               <div className="text-xs text-white font-semibold truncate">NZ Passport</div>
             </button>
 
@@ -759,12 +841,14 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
                   '12.04.2009',
                   calculateAge(12, 4, 2009),
                   'DENIED',
-                  `Underage patron (${calculateAge(12, 4, 2009)} yrs - Minimum legal age is ${settings.minAge}+)`
+                  `Underage patron (${calculateAge(12, 4, 2009)} yrs - Threshold ${settings.minAge}+)`
                 )
               }
               className="p-2.5 bg-white/5 hover:bg-[#ff4b4b]/20 border border-white/10 hover:border-[#ff4b4b]/50 rounded-xl text-left transition-all active:scale-95"
             >
-              <div className="text-[10px] font-mono-code text-[#ff4b4b] font-bold">DENY: UNDER 18</div>
+              <div className="text-[10px] font-mono-code text-[#ff4b4b] font-bold">
+                DENY: MINOR ({calculateAge(12, 4, 2009)})
+              </div>
               <div className="text-xs text-white font-semibold truncate">NZDL (Minor)</div>
             </button>
 
@@ -781,7 +865,9 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
               }
               className="p-2.5 bg-white/5 hover:bg-[#00ff85]/20 border border-white/10 hover:border-[#00ff85]/50 rounded-xl text-left transition-all active:scale-95"
             >
-              <div className="text-[10px] font-mono-code text-[#00ff85] font-bold">PASS: 18+ CARD</div>
+              <div className="text-[10px] font-mono-code text-[#00ff85] font-bold">
+                PASS: 18+ ({calculateAge(14, 2, 2004)})
+              </div>
               <div className="text-xs text-white font-semibold truncate">Kiwi Access</div>
             </button>
 
@@ -869,19 +955,19 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
             )}
 
             <p className="text-xs font-inter text-[#b9cbb9] mb-3">
-              Select or enter the Date of Birth shown on the physical ID card:
+              Confirm the Date of Birth seen on this ID card:
             </p>
 
             {/* Quick Age Presets */}
             <div className="mb-4">
               <span className="font-mono-code text-[10px] text-[#b9cbb9]/70 uppercase tracking-wider block mb-1.5">
-                QUICK AGE SELECTION
+                ONE-TAP AGE PRESETS
               </span>
               <div className="grid grid-cols-2 gap-2">
                 <button
                   type="button"
                   onClick={() => handleQuickAgePreset(17, modalDocType)}
-                  className="py-2 px-3 rounded-xl bg-[#ff4b4b]/15 border border-[#ff4b4b]/40 text-[#ff4b4b] font-mono-code text-xs font-bold text-left hover:bg-[#ff4b4b]/25 transition-all"
+                  className="py-2.5 px-3 rounded-xl bg-[#ff4b4b]/15 border border-[#ff4b4b]/40 text-[#ff4b4b] font-mono-code text-xs font-bold text-left hover:bg-[#ff4b4b]/25 active:scale-95 transition-all"
                 >
                   <div>UNDER 18 (17)</div>
                   <div className="text-[10px] text-[#b9cbb9]">Deny Entry</div>
@@ -889,7 +975,7 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
                 <button
                   type="button"
                   onClick={() => handleQuickAgePreset(18, modalDocType)}
-                  className="py-2 px-3 rounded-xl bg-[#feb700]/15 border border-[#feb700]/40 text-[#feb700] font-mono-code text-xs font-bold text-left hover:bg-[#feb700]/25 transition-all"
+                  className="py-2.5 px-3 rounded-xl bg-[#feb700]/15 border border-[#feb700]/40 text-[#feb700] font-mono-code text-xs font-bold text-left hover:bg-[#feb700]/25 active:scale-95 transition-all"
                 >
                   <div>TURNS 18 (18)</div>
                   <div className="text-[10px] text-[#b9cbb9]">Check Date</div>
@@ -897,7 +983,7 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
                 <button
                   type="button"
                   onClick={() => handleQuickAgePreset(21, modalDocType)}
-                  className="py-2 px-3 rounded-xl bg-[#00ff85]/15 border border-[#00ff85]/40 text-[#00ff85] font-mono-code text-xs font-bold text-left hover:bg-[#00ff85]/25 transition-all"
+                  className="py-2.5 px-3 rounded-xl bg-[#00ff85]/15 border border-[#00ff85]/40 text-[#00ff85] font-mono-code text-xs font-bold text-left hover:bg-[#00ff85]/25 active:scale-95 transition-all"
                 >
                   <div>LEGAL ADULT (21)</div>
                   <div className="text-[10px] text-[#b9cbb9]">Permit Entry</div>
@@ -905,7 +991,7 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
                 <button
                   type="button"
                   onClick={() => handleQuickAgePreset(26, modalDocType)}
-                  className="py-2 px-3 rounded-xl bg-[#00ff85]/15 border border-[#00ff85]/40 text-[#00ff85] font-mono-code text-xs font-bold text-left hover:bg-[#00ff85]/25 transition-all"
+                  className="py-2.5 px-3 rounded-xl bg-[#00ff85]/15 border border-[#00ff85]/40 text-[#00ff85] font-mono-code text-xs font-bold text-left hover:bg-[#00ff85]/25 active:scale-95 transition-all"
                 >
                   <div>ADULT (26+)</div>
                   <div className="text-[10px] text-[#b9cbb9]">Permit Entry</div>
@@ -916,7 +1002,7 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
             {/* Exact DDMMYYYY Keypad input */}
             <div>
               <span className="font-mono-code text-[10px] text-[#b9cbb9]/70 uppercase tracking-wider block mb-1.5">
-                EXACT DATE OF BIRTH (DDMMYYYY)
+                OR TYPE EXACT DOB (DDMMYYYY)
               </span>
               <div className="flex gap-2">
                 <input
@@ -924,7 +1010,9 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
                   maxLength={8}
                   placeholder="DDMMYYYY (e.g. 15082001)"
                   value={modalDobDigits}
-                  onChange={(e) => setModalDobDigits(e.target.value.replace(/[^0-9]/g, '').slice(0, 8))}
+                  onChange={(e) =>
+                    setModalDobDigits(e.target.value.replace(/[^0-9]/g, '').slice(0, 8))
+                  }
                   className="flex-1 bg-[#0a0a0a] border border-white/15 rounded-xl px-3 py-2 text-white font-mono-code text-sm tracking-wider focus:border-[#00ff85] focus:outline-none"
                 />
                 <button

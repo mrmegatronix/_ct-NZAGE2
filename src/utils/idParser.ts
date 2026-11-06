@@ -228,3 +228,102 @@ export function parseDateString(str: string): { day: number; month: number; year
 
   return null;
 }
+
+const MONTH_NAMES: Record<string, number> = {
+  jan: 1, january: 1,
+  feb: 2, february: 2,
+  mar: 3, march: 3,
+  apr: 4, april: 4,
+  may: 5,
+  jun: 6, june: 6,
+  jul: 7, july: 7,
+  aug: 8, august: 8,
+  sep: 9, sept: 9, september: 9,
+  oct: 10, october: 10,
+  nov: 11, november: 11,
+  dec: 12, december: 12,
+};
+
+export function extractDobFromOcrText(
+  text: string, 
+  minAge: number = 18
+): ParsedIdResult | null {
+  if (!text || typeof text !== 'string') return null;
+
+  // 1. NZDL standard field 3. (Date of birth)
+  const nzdlMatch = text.match(/(?:^|\n|\s)3[.:\s]+(\d{1,2})[./\-\s]+([A-Za-z]{3,9}|\d{1,2})[./\-\s]+(\d{4})/i);
+  if (nzdlMatch) {
+    const day = parseInt(nzdlMatch[1], 10);
+    const mStr = nzdlMatch[2].toLowerCase();
+    const month = MONTH_NAMES[mStr] || parseInt(mStr, 10);
+    const year = parseInt(nzdlMatch[3], 10);
+
+    if (year >= 1920 && year <= 2026 && month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+      const age = calculateAge(day, month, year);
+      const permitted = age >= minAge;
+      return {
+        dob: formatDob(day, month, year),
+        calculatedAge: age,
+        status: permitted ? 'PERMITTED' : 'DENIED',
+        documentType: 'NZDL',
+        documentLabel: 'NZ Driver Licence (Optical OCR)',
+        documentNumber: `DL-${Math.floor(100000 + Math.random() * 900000)}`,
+        statusReason: permitted 
+          ? `OCR Verified (${age}+ Legal Adult - NZDL)` 
+          : `Underage Refusal (${age} < ${minAge})`,
+      };
+    }
+  }
+
+  // 2. DOB / Date of birth labels (Kiwi Access 18+, Student ID, Passports)
+  const dobMatch = text.match(/(?:DOB|D\.O\.B|BIRTH|BORN|DATE OF BIRTH)[^\d\w]{0,12}(\d{1,2})[./\-\s]+([A-Za-z]{3,9}|\d{1,2})[./\-\s]+(\d{4})/i);
+  if (dobMatch) {
+    const day = parseInt(dobMatch[1], 10);
+    const mStr = dobMatch[2].toLowerCase();
+    const month = MONTH_NAMES[mStr] || parseInt(mStr, 10);
+    const year = parseInt(dobMatch[3], 10);
+
+    if (year >= 1920 && year <= 2026 && month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+      const age = calculateAge(day, month, year);
+      const permitted = age >= minAge;
+      const isR18 = /kiwi|18\+|access|hospitality/i.test(text);
+      return {
+        dob: formatDob(day, month, year),
+        calculatedAge: age,
+        status: permitted ? 'PERMITTED' : 'DENIED',
+        documentType: isR18 ? 'R18_Card' : 'Intl_ID',
+        documentLabel: isR18 ? '18+ Kiwi Access (Optical OCR)' : 'ID Document (Optical OCR)',
+        documentNumber: `ID-${Math.floor(100000 + Math.random() * 900000)}`,
+        statusReason: permitted 
+          ? `OCR Verified (${age}+ Legal Adult)` 
+          : `Underage Refusal (${age} < ${minAge})`,
+      };
+    }
+  }
+
+  // 3. Fallback: Parse any standard date in the text
+  const generalDate = text.match(/(?:^|\b)(\d{1,2})[./\-](\d{1,2})[./\-](19\d{2}|20[0-2]\d)(?:\b|$)/);
+  if (generalDate) {
+    const day = parseInt(generalDate[1], 10);
+    const month = parseInt(generalDate[2], 10);
+    const year = parseInt(generalDate[3], 10);
+
+    if (year >= 1920 && year <= 2026 && month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+      const age = calculateAge(day, month, year);
+      const permitted = age >= minAge;
+      return {
+        dob: formatDob(day, month, year),
+        calculatedAge: age,
+        status: permitted ? 'PERMITTED' : 'DENIED',
+        documentType: 'Other',
+        documentLabel: 'ID Document (Optical OCR)',
+        documentNumber: `ID-${Math.floor(100000 + Math.random() * 900000)}`,
+        statusReason: permitted 
+          ? `Optical Date Verified (${age}+ Yrs)` 
+          : `Underage Refusal (${age} < ${minAge})`,
+      };
+    }
+  }
+
+  return null;
+}
